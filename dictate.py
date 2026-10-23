@@ -195,7 +195,10 @@ def process(wav: Path, cfg: dict) -> dict:
     raw = apply_subs(transcribe(wav, list(subs.values()), cfg["language"]), subs)
     t1 = time.time()
     final, status, error = cleanup(raw, cfg)
-    final = apply_subs(final, subs)  # again, so the model cannot undo a correction
+    # Again, so the model cannot undo a correction; only pairs that are safe to apply twice
+    # ("firefly" → "Adobe Firefly" would become "Adobe Adobe Firefly").
+    again = {k: v for k, v in subs.items() if apply_subs(v, {k: v}) == v}
+    final = apply_subs(final, again)
     t2 = time.time()
     return {"raw": raw, "final": final, "cleanup": status, "error": error,
             "stt_s": round(t1 - t0, 2), "llm_s": round(t2 - t1, 2),

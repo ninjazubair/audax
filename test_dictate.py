@@ -86,6 +86,11 @@ dictate.transcribe = lambda wav, vocab, language: "send the work front update"
 dictate.ask_model = lambda cfg, system, user: "<dictation>Send the work front update.</dictation>"
 result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
 assert result["final"] == "Send the Workfront update." and result["cleanup"] == "ok"
+dictate.USER_SUBS.write_text('{"firefly": "Adobe Firefly"}')  # replacement holds its own key
+dictate.transcribe = lambda wav, vocab, language: "open firefly now"
+dictate.ask_model = lambda cfg, system, user: user  # echoes the <dictation> text unchanged
+result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
+assert result["final"] == "open Adobe Firefly now"  # applied once, never "Adobe Adobe Firefly"
 dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's

@@ -87,12 +87,19 @@ final class Settings: ObservableObject {
 
     /// dictate.py re-reads the file on every dictation, so a change applies to the next one.
     func saveWordSubs() {
-        if wordSubsUnreadable {  // keep the user's hand-edited file instead of overwriting it
-            // ponytail: one aside copy; a second unreadable file is overwritten if the move fails.
-            try? FileManager.default.moveItem(atPath: userSubsPath,
-                                              toPath: userSubsPath + ".unreadable")
-            wordSubsUnreadable = false
+        if wordSubsUnreadable, FileManager.default.fileExists(atPath: userSubsPath) {
+            // The user's hand-edited file: move it aside, never write over it.
+            let stamp = DateFormatter()
+            stamp.dateFormat = "yyyyMMdd-HHmmss"
+            let aside = userSubsPath + ".unreadable-" + stamp.string(from: Date())
+            do {
+                try FileManager.default.moveItem(atPath: userSubsPath, toPath: aside)
+            } catch {
+                appendToLog(["warning": "word_subs.json left unchanged: could not move aside"])
+                return
+            }
         }
+        wordSubsUnreadable = false
         let pairs = Dictionary(wordSubs.map { ($0.wrong, $0.right) }) { _, last in last }
         guard let data = try? JSONSerialization.data(withJSONObject: pairs,
                                                      options: [.prettyPrinted, .sortedKeys])

@@ -86,14 +86,14 @@ def gh_token(run=subprocess.run) -> str:
     """The GitHub CLI's token for github.com, or "" (no gh, signed out, slow, odd output).
 
     Read on every dictation, never stored. Nothing raised here can carry it: every failure,
-    including output that could not go in a header, gives "".
+    including output that is not UTF-8 or could not go in a header, gives "".
     """
     for gh in GH_PATHS:
         try:
             out = run([gh, "auth", "token", "--hostname", "github.com"],
                       capture_output=True, text=True, timeout=3)
-        except (OSError, subprocess.SubprocessError):
-            continue
+        except (OSError, subprocess.SubprocessError, ValueError):  # ValueError: not UTF-8;
+            continue  # its repr would quote stdout, i.e. the token
         token = (out.stdout or "").strip()
         if token and token.isascii() and token.isprintable():
             return token

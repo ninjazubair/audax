@@ -112,6 +112,8 @@ R = type("R", (), {})
 
 def gh_out(by_path):
     def run(cmd, **k):
+        assert cmd[0] in providers.GH_PATHS and k["timeout"] == 3
+        assert cmd[1:] == ["auth", "token", "--hostname", "github.com"]
         r = R()
         r.stdout, r.returncode = by_path[cmd[0]], 0
         return r
@@ -121,13 +123,20 @@ def gh_out(by_path):
 paths = providers.GH_PATHS  # second gh used when the first prints nothing; odd output refused
 assert providers.gh_token(run=gh_out({paths[0]: "", paths[1]: "gho_y\n"})) == "gho_y"
 assert providers.gh_token(run=gh_out({paths[0]: "warn\ngho_y\n", paths[1]: ""})) == ""
+
+
+def bad_bytes(cmd, **k):  # text=True on a non-UTF-8 byte: the error's repr holds the token
+    raise UnicodeDecodeError("utf-8", b"gho_FAKE\xff", 8, 9, "bad")
+
+
+assert providers.gh_token(run=bad_bytes) == ""
 assert calls[0] == "https://api.github.com/copilot_internal/user"
 assert set(json.loads(tmp.read_text())) == {"api", "at"} and tmp.stat().st_mode & 0o777 == 0o600
 tmp.write_text(json.dumps({"api": "https://api.business.githubcopilot.com", "at": 0}))
 providers.copilot_api_host("t", get=fake_get, cache=tmp)
 assert len(calls) == 2  # older than 24 h: asked again
 for api in ("http://api.githubcopilot.com", "https://githubcopilot.com.evil.example", 5, None,
-            "https://[x.githubcopilot.com"):
+            "https://[x.githubcopilot.com", "https://evilgithubcopilot.com"):
     got = providers.copilot_api_host("t", get=lambda u, h, t: {"endpoints": {"api": api}},
                                      cache=Path(tempfile.mkdtemp()) / "h.json")
     assert got == "https://api.githubcopilot.com", api

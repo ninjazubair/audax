@@ -17,6 +17,9 @@ let talkModifiers = UInt32(controlKey | optionKey)
 let handsFreeKeyCode = UInt32(kVK_Space)  // press to record, press again to finish
 let handsFreeModifiers = UInt32(controlKey | optionKey)
 let minRecordSeconds = 0.3  // shorter than this is "didn't catch that", never transcribed
+let voiceFloorDB: Float = -50  // loudest tick below this is silence, never transcribed
+// ponytail: calibration knob, assumed not measured; room noise on a Mac mic is usually
+// -55…-70 dBFS, speech -35…-15. Tune from the peak_db log lines.
 let maxSeconds = 300.0  // the only automatic stop
 let tick = 0.05
 let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't open file"
@@ -237,6 +240,7 @@ final class App: NSObject, NSApplicationDelegate {
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
     var mode = RecordMode.toggle
     var elapsed = 0.0
+    var peakDB: Float = -160  // loudest valid tick of the current recording
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
@@ -402,6 +406,7 @@ final class App: NSObject, NSApplicationDelegate {
         self.mode = mode
         phase = .recording
         elapsed = 0
+        peakDB = -160
         voice = VoiceMeter()
         if model.cleanup { warmCleanupModel() }
         chime.start()
@@ -433,7 +438,9 @@ final class App: NSObject, NSApplicationDelegate {
     func meter() {
         guard let rec = recorder else { return }
         rec.updateMeters()
-        let level = voice.update(db: rec.averagePower(forChannel: 0))
+        let db = rec.averagePower(forChannel: 0)
+        let level = voice.update(db: db)
+        if voice.ticks > 4, db > -90 { peakDB = max(peakDB, db) }  // VoiceMeter's warm-up skip
         elapsed += tick
         hud.meter(level, pulse: CGFloat(0.5 + 0.5 * cos(elapsed * 2 * .pi)))
         if elapsed >= maxSeconds { finishRecording() }
@@ -444,7 +451,8 @@ final class App: NSObject, NSApplicationDelegate {
         timer = nil
         recorder?.stop()
         recorder = nil
-        guard elapsed >= minRecordSeconds else {
+        appendToLog(["peak_db": Double(peakDB.rounded()), "seconds": (elapsed * 10).rounded() / 10])
+        guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
             chime.nothing()
             return hud.flash("Didn't catch that")

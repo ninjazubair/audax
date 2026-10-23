@@ -2,6 +2,7 @@
 import io
 import json
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,7 @@ urllib.request.urlopen = real_urlopen
 assert providers.GH_PATHS == ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
 assert providers.COPILOT_HEADERS["Copilot-Integration-Id"] == "audax"
 assert providers.HOST_CACHE == Path.home() / ".cache/mac-dictation/copilot_host.json"
+providers.HOST_CACHE = Path(tempfile.mkdtemp()) / "host.json"  # never the real one
 BIZ = "https://api.business.githubcopilot.com"
 assert providers.gh_token(run=lambda *a, **k: type(
     "R", (), {"stdout": " gho_x \n", "returncode": 0})()) == "gho_x"
@@ -135,6 +137,14 @@ assert set(json.loads(tmp.read_text())) == {"api", "at"} and tmp.stat().st_mode 
 tmp.write_text(json.dumps({"api": "https://api.business.githubcopilot.com", "at": 0}))
 providers.copilot_api_host("t", get=fake_get, cache=tmp)
 assert len(calls) == 2  # older than 24 h: asked again
+tmp.write_text(json.dumps({"api": BIZ, "at": time.time() + 3600}))
+assert providers.read_host_cache(tmp) is None  # dated in the future (clock moved back): stale
+d = Path(tempfile.mkdtemp())
+(d / "h.json").mkdir()  # os.replace onto a directory fails
+providers.write_host_cache(d / "h.json", BIZ)  # best effort: no exception
+assert [p.name for p in d.iterdir()] == ["h.json"]  # and its own temp file is gone
+(d / "f").write_text("")
+providers.write_host_cache(d / "f" / "h.json", BIZ)  # parent is a file: mkdir fails, no exception
 for api in ("http://api.githubcopilot.com", "https://githubcopilot.com.evil.example", 5, None,
             "https://[x.githubcopilot.com", "https://evilgithubcopilot.com"):
     got = providers.copilot_api_host("t", get=lambda u, h, t: {"endpoints": {"api": api}},
@@ -189,5 +199,24 @@ mine = {"model": "gpt-4.1"}
 assert providers.complete("copilot", mine, "S", "U") == "hi"
 assert sent == [("https://api.business.githubcopilot.com/chat/completions", "Bearer gho_t", 20)]
 assert mine == {"model": "gpt-4.1"}  # the caller's dict never gets the token
+
+
+def http_error(code):
+    def post(url, headers, body, timeout):
+        raise urllib.error.HTTPError(url, code, "x", {}, io.BytesIO(b""))
+    return post
+
+
+# A 401/403/404 from Copilot (e.g. gh switched account) marks the cached host stale; others don't.
+for code, at_after in ((403, 0), (401, 0), (404, 0), (500, None)):
+    providers.write_host_cache(providers.HOST_CACHE, BIZ)
+    providers.post_json = http_error(code)
+    try:
+        providers.complete("copilot", {"model": "m"}, "S", "U")
+        assert False
+    except urllib.error.HTTPError as e:
+        assert e.code == code
+    saved = json.loads(providers.HOST_CACHE.read_text())
+    assert saved["api"] == BIZ and (saved["at"] == 0) == (at_after == 0), (code, saved)
 
 print("ok")

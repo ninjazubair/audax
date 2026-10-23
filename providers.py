@@ -11,6 +11,7 @@ import os
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -114,19 +115,31 @@ def copilot_host_ok(api) -> bool:
 def read_host_cache(cache: Path) -> Optional[str]:
     try:
         saved = json.loads(cache.read_text())
-        api, fresh = saved["api"], time.time() - saved["at"] < HOST_CACHE_SECONDS
+        api, fresh = saved["api"], 0 <= time.time() - saved["at"] < HOST_CACHE_SECONDS
     except (OSError, ValueError, KeyError, TypeError):  # none yet, or not ours
         return None
     return api if fresh and copilot_host_ok(api) else None
 
 
-def write_host_cache(cache: Path, api: str) -> None:
-    """Atomic, mode 0600 (mkstemp's), and the host only."""
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=cache.parent, prefix=cache.name + ".")
-    with os.fdopen(fd, "w") as f:
-        json.dump({"api": api, "at": time.time()}, f)
-    os.replace(tmp, cache)
+def write_host_cache(cache: Path, api: str, at: Optional[float] = None) -> None:
+    """Atomic, mode 0600 (mkstemp's), and the host only. at=0 marks it stale.
+
+    Best effort: a cache that cannot be written never fails a clean-up that has its host.
+    On failure only the temp file this call created is removed.
+    """
+    tmp = None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=cache.parent, prefix=cache.name + ".")
+        with os.fdopen(fd, "w") as f:
+            json.dump({"api": api, "at": time.time() if at is None else at}, f)
+        os.replace(tmp, cache)
+    except OSError:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def copilot_api_host(token: str, get=get_json, cache: Optional[Path] = None) -> str:
@@ -180,4 +193,10 @@ def complete(provider: str, cfg: dict, system: str, user: str, timeout: float = 
     if provider == "copilot":
         cfg = with_copilot_auth(cfg)
     url, headers, body = BUILDERS[provider](cfg, system, user)
-    return extract_text(provider, post_json(url, headers, body, timeout))
+    try:
+        resp = post_json(url, headers, body, timeout)
+    except urllib.error.HTTPError as e:
+        if provider == "copilot" and e.code in (401, 403, 404):  # e.g. gh switched account:
+            write_host_cache(HOST_CACHE, cfg["_host"], at=0)  # ask for the host next time
+        raise
+    return extract_text(provider, resp)

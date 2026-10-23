@@ -258,6 +258,7 @@ final class App: NSObject, NSApplicationDelegate {
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
     lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
     var checkTimer: Timer?
+    var keepAliveTimer: Timer?  // keeps the local clean-up model loaded between dictations
     var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
     var mode = RecordMode.toggle
@@ -279,8 +280,12 @@ final class App: NSObject, NSApplicationDelegate {
         usr1?.setEventHandler { [weak self] in self?.toggle() }
         usr1?.resume()
         refreshIcon()
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        checkTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.refreshChecks()
+        }
+        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 240,
+                                              repeats: true) { [weak self] _ in
+            self?.warmCleanupModel()  // gated inside: local Ollama with clean-up on
         }
         showWindow()
     }
@@ -382,7 +387,8 @@ final class App: NSObject, NSApplicationDelegate {
         guard let gh = ghPath() else { return }
         let script = stateDir + "/gh-login.command"
         do {
-            try "#!/bin/bash\nexec \(gh) auth login --hostname github.com --web\n"
+            let login = "auth login --hostname github.com --web --git-protocol https"
+            try "#!/bin/bash\nexec \(gh) \(login)\n"
                 .write(toFile: script, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
         } catch {
@@ -507,7 +513,8 @@ final class App: NSObject, NSApplicationDelegate {
         elapsed = 0
         peakDB = -160
         voice = VoiceMeter()
-        if settings.provider == "ollama" && settings.cleanup != "off" { warmCleanupModel() }
+        warmCleanupModel()
+        preReadModel()
         if settings.sounds { chime.start() }
         hud.show()
         // Start the mic just after the 0.09 s tick so it is not recorded, and soon enough not
@@ -551,7 +558,7 @@ final class App: NSObject, NSApplicationDelegate {
         timer = nil
         recorder?.stop()
         recorder = nil
-        appendToLog(["peak_db": Double(peakDB.rounded()), "seconds": (elapsed * 10).rounded() / 10])
+        appendToLog(["peak_db": Double(peakDB.rounded()), "ms": Int((elapsed * 1000).rounded())])
         guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
             if settings.sounds { chime.nothing() }
@@ -566,7 +573,7 @@ final class App: NSObject, NSApplicationDelegate {
         let proc = Process()
         let out = Pipe(), err = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [script, wavURL.path]
+        proc.arguments = ["-B", script, wavURL.path]  // -B: never a __pycache__ in the signed app
         // Settings go in on stdin, written before launch: the pipe buffers them, and a script
         // that exits early cannot leave a write to a closed pipe (SIGPIPE).
         let input = Pipe()
@@ -624,15 +631,28 @@ final class App: NSObject, NSApplicationDelegate {
         paste(text)
     }
 
-    /// Loads the clean-up model now, while the user speaks, and keeps it loaded for an hour:
-    /// Ollama otherwise unloads it after 5 idle minutes and the next clean-up takes ~4 s.
+    /// Loads the clean-up model while the user speaks, and again every 4 minutes from
+    /// `keepAliveTimer`: Ollama otherwise unloads it when idle and the next clean-up takes ~4 s.
+    /// Local Ollama with clean-up on only: nothing is sent for another provider.
     func warmCleanupModel() {
-        guard let url = URL(string: "http://127.0.0.1:11434/api/generate") else { return }
+        guard settings.provider == "ollama", settings.cleanup != "off",
+              let url = URL(string: "http://127.0.0.1:11434/api/generate") else { return }
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
         req.httpBody = try? JSONSerialization.data(
             withJSONObject: ["model": settings.models["ollama"] ?? "", "keep_alive": "1h"])
         URLSession.shared.dataTask(with: req).resume()  // fire and forget; failure = no clean-up
+    }
+
+    /// Reads the whisper model while the user speaks, so whisper-cli finds it in memory instead
+    /// of on disk. Fire and forget.
+    func preReadModel() {
+        guard FileManager.default.fileExists(atPath: modelPath) else { return }
+        let cat = Process()
+        cat.executableURL = URL(fileURLWithPath: "/bin/cat")
+        cat.arguments = [modelPath]
+        cat.standardOutput = FileHandle.nullDevice
+        try? cat.run()
     }
 
     /// Puts the text on the clipboard (it stays there, like Blip) and pastes it into the app the

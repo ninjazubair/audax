@@ -124,7 +124,7 @@ struct MainView: View {
             footer
         }
         .padding(20)
-        .frame(width: 540)
+        .frame(minWidth: 540)
     }
 
     var header: some View {
@@ -221,10 +221,10 @@ struct MainView: View {
                         }
                     }
                 }
-                .frame(height: 190)
+                .frame(minHeight: 190, maxHeight: .infinity)  // takes the window's extra height
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     var footer: some View {
@@ -257,14 +257,14 @@ final class MainWindow {
     let window: NSWindow
 
     init(model: Model, settings: Settings, actions: Actions) {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
-                          styleMask: [.titled, .closable, .miniaturizable],
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         window.title = "AUDAX"
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 540, height: 520)
         window.contentView = NSHostingView(rootView: MainView(model: model, settings: settings,
                                                               actions: actions))
-        window.setContentSize(window.contentView?.fittingSize ?? window.frame.size)
         window.center()
     }
 

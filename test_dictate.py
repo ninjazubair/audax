@@ -157,7 +157,10 @@ assert "401" in dictate.LOG.read_text()
 dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
-assert dictate.main([]) == 1  # no recording given
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    assert dictate.main([]) == 1  # no recording given
+assert err.getvalue().startswith("usage:")
 assert dictate.main(["/nonexistent.wav"]) == 1  # whisper fails: error, not a crash
 
 print("ok")

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Turn one recording into clean text: transcribe locally, then clean up with a model.
 
-Called by AUDAX.app as: dictate.py <recording.wav>, with one JSON object of settings on stdin
-(see DEFAULT_CONFIG; never logged, it carries an API key). Prints one JSON object on stdout,
-{"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text. Exit codes: 0 text
-printed, 3 nothing usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't
-open file".
+Called by AUDAX.app as: python3 -B dictate.py <recording.wav>, with one JSON object of settings
+on stdin: {"provider", "model", "language", "cleanup": "full"|"light"|"off", "api_key"} (see
+DEFAULT_CONFIG; never logged, it can carry an API key). Prints one JSON object on stdout,
+{"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text, and "skipped"
+means the raw transcript because the clean-up failed. Exit codes: 0 text printed, 3 nothing
+usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't open file".
+
+Clean-up providers (providers.py): "ollama" (local Ollama, the default), "copilot" (GitHub
+Copilot, token from the GitHub CLI), "claude" (Anthropic) and "openai" (OpenAI), the last two
+with a key from the Keychain. Local by default; remote providers are opt-in. Audio never
+leaves the machine (whisper.cpp on the Apple GPU); a remote provider gets only the transcript.
 Setting names follow Jason Ko's Windows tool (whisper-voice-dictation config.py) so this
-can merge into it. Audio never leaves the machine (whisper.cpp on the Apple GPU); the text
-goes to local Ollama, or to the provider chosen in Settings (providers.py).
+can merge into it.
 """
 import http.client
 import json

@@ -7,7 +7,10 @@
 # kept: stray AUDAX.app copies would each show up in Launchpad and Spotlight.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.1.0"
+VERSION="0.2.0"
+# Explicit: swiftc's default deployment target follows the build Mac and came out as 28.0 on
+# macOS 27.0.1, which LaunchServices refuses to open. 14.0: the code uses macOS 14 APIs.
+MIN_MACOS="14.0"
 IDENTITY="AUDAX Local Signing"
 BUNDLE_ID="local.audax"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -35,7 +38,7 @@ make_identity() {
 security find-identity -p codesigning | grep -q "\"$IDENTITY\"" || make_identity
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/AUDAX" \
+swiftc -O -swift-version 5 -target "arm64-apple-macos$MIN_MACOS" -o "$APP/Contents/MacOS/AUDAX" \
   "$DIR/main.swift" "$DIR/AUDAX.swift" "$DIR/AUDAXWindow.swift" "$DIR/Shortcut.swift" \
   "$DIR/Settings.swift"
 cp "$DIR/dictate.py" "$DIR/providers.py" "$DIR/word_subs.json" "$DIR/setup.sh" \
@@ -53,7 +56,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$STAMP</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>AUDAX records your voice for local dictation.</string>
 </dict></plist>

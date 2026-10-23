@@ -243,7 +243,7 @@ final class App: NSObject, NSApplicationDelegate {
         registerHotKeys()
         settings.onShortcutsChanged = { [unowned self] in
             self.registerHotKeys()
-            self.buildMenu()  // the dictation item shows the talk key
+            self.buildMenu()  // the dictation item shows the hands-free key
         }
         // `pkill -USR1 AUDAX` acts like the hands-free key: lets scripts and tests drive the app.
         signal(SIGUSR1, SIG_IGN)
@@ -330,7 +330,8 @@ final class App: NSObject, NSApplicationDelegate {
                                 keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
                                 keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "Start / stop dictation   \(settings.talkKey.display)",
+        let handsFree = settings.handsFreeKey.display  // the item acts like the hands-free key
+        menu.addItem(NSMenuItem(title: "Start / stop dictation   \(handsFree)",
                                 action: #selector(toggle), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open dictation log", action: #selector(openLog),
                                 keyEquivalent: ""))

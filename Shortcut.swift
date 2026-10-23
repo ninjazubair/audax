@@ -12,12 +12,14 @@ struct Shortcut: Codable, Equatable {
     static let handsFreeDefault = Shortcut(keyCode: UInt32(kVK_Space),
                                            modifiers: UInt32(controlKey | optionKey))
 
-    /// The pressed key as a shortcut; nil when none of ⌃⌥⇧⌘ is held.
+    /// The pressed key as a shortcut; nil unless ⌃, ⌥ or ⌘ is held. ⇧ alone does not count:
+    /// a registered hot key is swallowed system-wide, so ⇧D would eat every capital D.
     static func from(_ event: NSEvent) -> Shortcut? {
         let pairs: [(NSEvent.ModifierFlags, Int)] = [
             (.control, controlKey), (.option, optionKey), (.shift, shiftKey), (.command, cmdKey)]
         let mods = pairs.filter { event.modifierFlags.contains($0.0) }.reduce(0) { $0 | $1.1 }
-        return mods == 0 ? nil : Shortcut(keyCode: UInt32(event.keyCode), modifiers: UInt32(mods))
+        guard mods & (controlKey | optionKey | cmdKey) != 0 else { return nil }
+        return Shortcut(keyCode: UInt32(event.keyCode), modifiers: UInt32(mods))
     }
 
     /// Menu-style label, e.g. "⌃⌥D" or "⌃⌥Space".
@@ -97,7 +99,7 @@ struct ShortcutRecorder: View {
         let new = Shortcut.from(event)
         if new == nil, event.keyCode == UInt16(kVK_Escape) { return stop() }
         guard let new = new else {
-            problem = "Add ⌃, ⌥, ⇧ or ⌘"
+            problem = "Add ⌃, ⌥ or ⌘"
             return
         }
         guard new != conflictsWith else {

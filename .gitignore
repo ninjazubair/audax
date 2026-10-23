@@ -1,0 +1,5 @@
+.DS_Store
+dist/
+_backup-*/
+__pycache__/
+.superpowers/

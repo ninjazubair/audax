@@ -135,6 +135,12 @@ for provider, reply in [("ollama", []), ("ollama", {}), ("ollama", {"message": N
     got = dictate.cleanup("um hello", {**claude, "provider": provider})
     assert got[:2] == ("um hello", "skipped") and got[2], (provider, reply, got)
 
+real_gh = dictate.providers.gh_token  # copilot, not signed in to GitHub: raw text, not exit 1
+dictate.providers.gh_token = lambda: ""
+got = dictate.cleanup("um hello", {**dictate.DEFAULT_CONFIG, "provider": "copilot"})
+assert got[:2] == ("um hello", "skipped") and "not signed in" in got[2], got
+dictate.providers.gh_token = real_gh
+
 SECRET = "sk-test-NEVER-LOG-ME"  # the key reaches neither the log nor the app's stdout
 dictate.transcribe = lambda wav, vocab, language: "um so send the update"
 for key in (SECRET, SECRET + "\nx"):

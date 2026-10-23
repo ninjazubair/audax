@@ -16,6 +16,7 @@ final class Model: ObservableObject {
     @Published var pasteOK = false
     @Published var engineOK = false
     @Published var cleanupOK = false
+    @Published var gitHub = GitHubSignIn.signedOut  // copilot only: the last gh probe's answer
     @Published var recent: [Recent] = []
     @Published var scratch = ""
 
@@ -37,6 +38,7 @@ struct Actions {
     let allowMic: () -> Void
     let allowPaste: () -> Void
     let runSetup: () -> Void
+    let signInGitHub: () -> Void
     let startOllama: () -> Void
     let openLog: () -> Void
     let openSettings: () -> Void
@@ -155,17 +157,28 @@ struct MainView: View {
 
     var cleanupRow: some View {
         let provider = settings.provider, name = settings.models[provider] ?? ""
+        let ok = model.cleanupOK || settings.cleanup == "off"
         var detail = "Local Ollama with \(name): punctuation, fillers, corrections."
         if settings.cleanup == "off" {
             detail = "Switched off in Settings: you get the raw transcript."
+        } else if provider == "copilot" && !ok {
+            detail = model.gitHub == .noCLI
+                ? "GitHub CLI not found. Install it with: brew install gh"
+                : "Not signed in to GitHub. Sign in, then dictate."
         } else if let to = Settings.recipients[provider] {
             detail = "\(Settings.providerName(provider)) (\(name)): text is sent to \(to)."
         }
-        let keyed = Settings.keyProviders.contains(provider)
-        return CheckRow(ok: model.cleanupOK || settings.cleanup == "off", title: "AI clean-up",
-                        detail: detail,
-                        fixTitle: provider == "ollama" ? "Start Ollama" : keyed ? "Settings…" : "",
-                        fix: provider == "ollama" ? actions.startOllama : actions.openSettings)
+        let (fixTitle, fix) = cleanupFix
+        return CheckRow(ok: ok, title: "AI clean-up", detail: detail, fixTitle: fixTitle, fix: fix)
+    }
+
+    /// No button without gh: the detail says how to install it.
+    var cleanupFix: (String, () -> Void) {
+        switch settings.provider {
+        case "ollama": return ("Start Ollama", actions.startOllama)
+        case "copilot": return (model.gitHub == .noCLI ? "" : "Sign in…", actions.signInGitHub)
+        default: return ("Settings…", actions.openSettings)  // claude, openai: the key
+        }
     }
 
     /// Off counts as local: with clean-up switched off no text is sent anywhere.

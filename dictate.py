@@ -168,15 +168,16 @@ def ask_model(cfg: dict, system: str, user: str) -> str:
 
 
 CLEANUP_ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError,
-                  http.client.HTTPException)
+                  http.client.HTTPException, RuntimeError)  # RuntimeError: copilot not signed in
 
 
 def cleanup(text: str, cfg: dict) -> tuple:
     """Returns (text, "ok"|"skipped"|"off", error or None).
 
     "skipped" gives back the input text, in two cases: the model call or its reply failed with
-    one of CLEANUP_ERRORS (network, HTTP status, bad JSON, a reply of the wrong shape; error =
-    repr of the exception, kept free of the API key by providers.api_key), or reject_reason
+    one of CLEANUP_ERRORS (network, HTTP status, bad JSON, a reply of the wrong shape, no GitHub
+    sign-in; error = repr of the exception, kept free of the API key by providers.api_key and of
+    the GitHub token by providers.gh_token), or reject_reason
     refused the answer (error = "rejected: ..."). Any other exception propagates to main: exit 1.
     """
     if cfg["cleanup"] == "off" or not has_words(text):

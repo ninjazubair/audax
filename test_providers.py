@@ -1,8 +1,10 @@
 """Run: /usr/bin/python3 test_providers.py"""
 import io
 import json
+import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import providers
 
@@ -58,7 +60,7 @@ seen = {}
 
 
 def fake_urlopen(req, timeout):
-    seen.update(url=req.full_url, method=req.get_method(), body=json.loads(req.data),
+    seen.update(url=req.full_url, method=req.get_method(), body=req.data and json.loads(req.data),
                 ua=req.get_header("User-agent"), key=req.get_header("X-api-key"), timeout=timeout)
     return io.BytesIO(b'{"ok": 1}')
 
@@ -68,13 +70,75 @@ urllib.request.urlopen = fake_urlopen
 assert providers.post_json("http://x/y", {"x-api-key": "k"}, {"q": 1}, 7) == {"ok": 1}
 assert seen == {"url": "http://x/y", "method": "POST", "body": {"q": 1}, "ua": UA, "key": "k",
                 "timeout": 7}
+assert providers.get_json("http://x/z", {"x-api-key": "k"}, 10) == {"ok": 1}  # the GET sibling
+assert seen == {"url": "http://x/z", "method": "GET", "body": None, "ua": UA, "key": "k",
+                "timeout": 10}
 urllib.request.urlopen = real_urlopen
 
+# GitHub Copilot: the token comes from the GitHub CLI on every call; only the host is cached.
+assert providers.GH_PATHS == ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
+assert providers.COPILOT_HEADERS["Copilot-Integration-Id"] == "audax"
+assert providers.HOST_CACHE == Path.home() / ".cache/mac-dictation/copilot_host.json"
+BIZ = "https://api.business.githubcopilot.com"
+assert providers.gh_token(run=lambda *a, **k: type(
+    "R", (), {"stdout": " gho_x \n", "returncode": 0})()) == "gho_x"
+assert providers.gh_token(run=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())) == ""
+tmp = Path(tempfile.mkdtemp()) / "host.json"
+calls = []
+
+
+def fake_get(url, headers, timeout):
+    calls.append(url)
+    return {"chat_enabled": True, "endpoints": {"api": "https://api.business.githubcopilot.com"}}
+
+
+assert providers.copilot_api_host("t", get=fake_get, cache=tmp) == BIZ
+assert providers.copilot_api_host("t", get=fake_get, cache=tmp) == BIZ and len(calls) == 1  # cached
+
+
+def evil_get(url, headers, timeout):
+    return {"chat_enabled": True, "endpoints": {"api": "https://evil.example.com"}}
+
+
+assert providers.copilot_api_host("t", get=evil_get, cache=Path(tempfile.mkdtemp()) / "h.json"
+                                  ) == "https://api.githubcopilot.com"
+url, h, b = providers.copilot_request({"model": "gpt-4.1", "_token": "t", "_host": BIZ}, "S", "U")
+assert url == "https://api.business.githubcopilot.com/chat/completions"
+assert h["Authorization"] == "Bearer t" and h["Copilot-Integration-Id"] == "audax"
+assert "gho" not in str(json.loads(tmp.read_text()))  # host cache holds no token
+
+R = type("R", (), {})
+
+
+def gh_out(by_path):
+    def run(cmd, **k):
+        r = R()
+        r.stdout, r.returncode = by_path[cmd[0]], 0
+        return r
+    return run
+
+
+paths = providers.GH_PATHS  # second gh used when the first prints nothing; odd output refused
+assert providers.gh_token(run=gh_out({paths[0]: "", paths[1]: "gho_y\n"})) == "gho_y"
+assert providers.gh_token(run=gh_out({paths[0]: "warn\ngho_y\n", paths[1]: ""})) == ""
+assert calls[0] == "https://api.github.com/copilot_internal/user"
+assert set(json.loads(tmp.read_text())) == {"api", "at"} and tmp.stat().st_mode & 0o777 == 0o600
+tmp.write_text(json.dumps({"api": "https://api.business.githubcopilot.com", "at": 0}))
+providers.copilot_api_host("t", get=fake_get, cache=tmp)
+assert len(calls) == 2  # older than 24 h: asked again
+for api in ("http://api.githubcopilot.com", "https://githubcopilot.com.evil.example", 5, None,
+            "https://[x.githubcopilot.com"):
+    got = providers.copilot_api_host("t", get=lambda u, h, t: {"endpoints": {"api": api}},
+                                     cache=Path(tempfile.mkdtemp()) / "h.json")
+    assert got == "https://api.githubcopilot.com", api
 try:
-    providers.complete("copilot", {"model": "m"}, "S", "U")
+    providers.copilot_api_host("t", get=lambda u, h, t: {"chat_enabled": False},
+                               cache=Path(tempfile.mkdtemp()) / "h.json")
     assert False
-except RuntimeError as e:
-    assert "Task 6" in str(e)
+except RuntimeError:
+    pass
+assert b == {"model": "gpt-4.1", "temperature": 0, "messages": [
+    {"role": "system", "content": "S"}, {"role": "user", "content": "U"}]}
 
 calls = []  # complete dispatches to the provider's builder and calls the module's post_json
 
@@ -99,5 +163,22 @@ try:
     assert False
 except urllib.error.HTTPError as e:
     assert e.code == 401  # test_complete_http_error_raises: the caller decides
+
+providers.gh_token = lambda: ""  # copilot without a GitHub sign-in
+try:
+    providers.complete("copilot", {"model": "m"}, "S", "U")
+    assert False
+except RuntimeError as e:
+    assert "not signed in" in str(e)
+providers.gh_token = lambda: "gho_t"
+providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
+sent = []
+providers.post_json = lambda url, headers, body, timeout: (
+    sent.append((url, headers["Authorization"], timeout))
+    or {"choices": [{"message": {"content": "hi"}}]})
+mine = {"model": "gpt-4.1"}
+assert providers.complete("copilot", mine, "S", "U") == "hi"
+assert sent == [("https://api.business.githubcopilot.com/chat/completions", "Bearer gho_t", 20)]
+assert mine == {"model": "gpt-4.1"}  # the caller's dict never gets the token
 
 print("ok")

@@ -23,6 +23,32 @@ let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't 
 
 enum Phase { case idle, recording, transcribing }
 enum RecordMode { case hold, toggle }
+enum GitHubSignIn { case signedIn, signedOut, noCLI }  // for clean-up with GitHub Copilot
+
+/// providers.GH_PATHS: absolute, because an app's PATH has no Homebrew.
+let ghPaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]
+
+func ghPath() -> String? { ghPaths.first { FileManager.default.isExecutableFile(atPath: $0) } }
+
+/// True when `gh auth token` prints a token within 3 s. The token stays in a local and is
+/// dropped here: only "non-empty" leaves this function. dictate.py asks gh again per dictation.
+func ghHasToken(_ gh: String) -> Bool {
+    let proc = Process(), out = Pipe(), done = DispatchSemaphore(value: 0)
+    proc.executableURL = URL(fileURLWithPath: gh)
+    proc.arguments = ["auth", "token", "--hostname", "github.com"]
+    proc.standardInput = FileHandle.nullDevice
+    proc.standardOutput = out
+    proc.standardError = FileHandle.nullDevice
+    proc.terminationHandler = { _ in done.signal() }
+    guard (try? proc.run()) != nil else { return false }
+    guard done.wait(timeout: .now() + 3) == .success else {
+        proc.terminate()
+        return false
+    }
+    let token = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return proc.terminationStatus == 0 && !token.isEmpty
+}
 
 /// Short generated chimes, independent of the alert-volume slider. The audio engine runs only
 /// while a chime plays, so the speakers are not held open (and idle sleep not blocked) all day.
@@ -224,13 +250,15 @@ final class App: NSObject, NSApplicationDelegate {
         allowMic: { [unowned self] in self.allowMic() },
         allowPaste: { [unowned self] in self.openAccessibility() },
         runSetup: { [unowned self] in self.runSetup() },
+        signInGitHub: { [unowned self] in self.signInGitHub() },
         startOllama: { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app")) },
         openLog: { [unowned self] in self.openLog() },
         openSettings: { [unowned self] in self.showSettings() },
         pauseHotKeys: { [unowned self] in self.pauseHotKeys($0) })
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
-    lazy var settingsWindow = SettingsWindow(settings: settings, actions: actions)
+    lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
     var checkTimer: Timer?
+    var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
     var mode = RecordMode.toggle
     var elapsed = 0.0
@@ -277,8 +305,28 @@ final class App: NSObject, NSApplicationDelegate {
         model.engineOK = !needsSetup()
         switch settings.provider {
         case "ollama": checkOllama()
-        case "claude", "openai": model.cleanupOK = Keychain.get(account: settings.provider) != nil
-        default: model.cleanupOK = true  // copilot: placeholder until Task 6 checks the sign-in
+        case "copilot": checkGitHub()
+        default: model.cleanupOK = Keychain.has(account: settings.provider)  // claude, openai
+        }
+    }
+
+    /// Signed in to GitHub, from a background `gh auth token` probe at most every 30 s; between
+    /// probes the last answer stands. No gh at all is a file check, done every time.
+    func checkGitHub() {
+        guard let gh = ghPath() else {
+            model.gitHub = .noCLI
+            model.cleanupOK = false
+            return
+        }
+        model.cleanupOK = model.gitHub == .signedIn
+        guard Date().timeIntervalSince(lastGitHubProbe) >= 30 else { return }
+        lastGitHubProbe = Date()
+        DispatchQueue.global().async {
+            let signedIn = ghHasToken(gh)
+            DispatchQueue.main.async {
+                self.model.gitHub = signedIn ? .signedIn : .signedOut
+                if self.settings.provider == "copilot" { self.model.cleanupOK = signedIn }
+            }
         }
     }
 
@@ -325,8 +373,28 @@ final class App: NSObject, NSApplicationDelegate {
 
     @objc func runSetup() {
         guard let setup = Bundle.main.url(forResource: "setup", withExtension: "sh") else { return }
+        openInTerminal(setup)
+    }
+
+    /// GitHub's own browser sign-in, in Terminal. The token stays in gh's store; AUDAX never
+    /// keeps it. The next gh probe (within 30 s) turns the check green.
+    func signInGitHub() {
+        guard let gh = ghPath() else { return }
+        let script = stateDir + "/gh-login.command"
+        do {
+            try "#!/bin/bash\nexec \(gh) auth login --hostname github.com --web\n"
+                .write(toFile: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
+        } catch {
+            let why = error.localizedDescription
+            return appendToLog(["warning": "GitHub sign-in not started: \(why)"])
+        }
+        openInTerminal(URL(fileURLWithPath: script))
+    }
+
+    func openInTerminal(_ script: URL) {
         let terminal = URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")
-        NSWorkspace.shared.open([setup], withApplicationAt: terminal,
+        NSWorkspace.shared.open([script], withApplicationAt: terminal,
                                 configuration: NSWorkspace.OpenConfiguration())
     }
 
@@ -524,7 +592,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     /// What dictate.py reads on stdin. Never logged: it carries the API key, read from the
-    /// Keychain only for the providers that need one.
+    /// Keychain only for the providers that need one. Copilot needs none: dictate.py asks gh.
     func configJSON() -> Data {
         let provider = settings.provider
         let key = Settings.keyProviders.contains(provider) ? Keychain.get(account: provider) : nil

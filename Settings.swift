@@ -27,6 +27,11 @@ enum Keychain {
         }
     }
 
+    /// Whether a key is stored, without reading (decrypting) it: for the 2-second check.
+    static func has(account: String) -> Bool {
+        SecItemCopyMatching(query(account) as CFDictionary, nil) == errSecSuccess
+    }
+
     static func get(account: String) -> String? {
         var q = query(account)
         q[kSecReturnData as String] = true
@@ -177,6 +182,7 @@ final class Settings: ObservableObject {
 
 struct SettingsView: View {
     @ObservedObject var settings: Settings
+    @ObservedObject var model: Model  // the GitHub sign-in state, kept fresh by refreshChecks
     let actions: Actions
     @State private var wrong = ""  // the Words box's new pair
     @State private var right = ""
@@ -258,16 +264,25 @@ struct SettingsView: View {
                 }
                 Text(keySaved ? "Key saved" : "No key").font(.caption).foregroundColor(.secondary)
             } else if settings.provider == "copilot" {
-                Text("GitHub sign-in is added in the next step.")  // Task 6 replaces this
-                    .font(.caption).foregroundColor(.secondary)
+                HStack {
+                    Text(Self.gitHubCaptions[model.gitHub] ?? "")
+                        .font(.caption).foregroundColor(.secondary)
+                    Spacer()
+                    Button("Sign in to GitHub…", action: actions.signInGitHub)
+                        .disabled(model.gitHub == .noCLI)
+                }
             }
         }
         .frame(height: 43, alignment: .topLeading)
     }
 
+    static let gitHubCaptions: [GitHubSignIn: String] = [
+        .signedIn: "Signed in to GitHub", .signedOut: "Not signed in",
+        .noCLI: "GitHub CLI not found"]
+
     func refreshKey() {
         keySaved = Settings.keyProviders.contains(settings.provider)
-            && Keychain.get(account: settings.provider) != nil
+            && Keychain.has(account: settings.provider)
     }
 
     func saveKey() {
@@ -320,12 +335,12 @@ struct SettingsView: View {
 final class SettingsWindow {
     let window: NSWindow
 
-    init(settings: Settings, actions: Actions) {
+    init(settings: Settings, model: Model, actions: Actions) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 400),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "AUDAX Settings"
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: SettingsView(settings: settings,
+        window.contentView = NSHostingView(rootView: SettingsView(settings: settings, model: model,
                                                                   actions: actions))
         window.setContentSize(window.contentView?.fittingSize ?? window.frame.size)
         window.center()

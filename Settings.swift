@@ -101,11 +101,26 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Task 3 puts the clean-up level here, Task 5 the provider, model and API key.
+    static let cleanupCaptions = [
+        "off": "You get the raw transcript.",
+        "light": "Punctuation, filler words and self-corrections.",
+        "full": "Light, plus grammar, word order and recognition errors.",
+    ]
+
+    /// Task 5 adds the provider, model and API key here.
     var cleanupBox: some View {
-        Text("Clean-up options are not available yet.")
-            .foregroundColor(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Clean-up", selection: $settings.cleanup) {
+                Text("Off").tag("off")
+                Text("Light").tag("light")
+                Text("Full").tag("full")
+            }
+            .pickerStyle(.segmented)
+            Text(Self.cleanupCaptions[settings.cleanup] ?? "")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Task 4 puts the misspelling → correct word table here.

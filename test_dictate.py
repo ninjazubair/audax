@@ -1,4 +1,6 @@
 """Run: /usr/bin/python3 test_dictate.py"""
+import io
+import sys
 import tempfile
 from pathlib import Path
 
@@ -27,8 +29,25 @@ assert dictate.accept("what is AEP", "AEP is Adobe Experience Platform, a real-t
                       "customer data platform that unifies profiles.") == "what is AEP"
 assert dictate.accept("hello", "") == "hello"
 
-assert dictate.cleanup("um hello", url="http://127.0.0.1:9/x") == "um hello"  # Ollama down
+assert dictate.read_config(io.StringIO("")) == dictate.DEFAULT_CONFIG
+assert dictate.read_config(io.StringIO(
+    '{"language": "de", "cleanup": "light"}'))["language"] == "de"
+assert dictate.read_config(io.StringIO("not json"))["provider"] == "ollama"
+assert "German" in dictate.prompt_for("de", "full")
+assert "never translate" in dictate.prompt_for("de", "full")
+assert "grammar" in dictate.prompt_for("en", "full")
+assert "grammar" not in dictate.prompt_for("en", "light")
+assert "ähm" in dictate.prompt_for("de", "light")
+off = dictate.cleanup("hello", {**dictate.DEFAULT_CONFIG, "cleanup": "off"})
+assert off[:2] == ("hello", "off")
+down = dictate.cleanup("um hello", {**dictate.DEFAULT_CONFIG, "url": "http://127.0.0.1:9/x"})
+assert down[:2] == ("um hello", "skipped") and down[2]  # Ollama down: raw text, error kept
+assert dictate.apply_subs("der käse ist gut", {"käse": "Käse"}) == "der Käse ist gut"  # umlauts
+assert dictate.has_words("Äpfel")
+assert dictate.accept("one two three four five six seven eight",  # model dropped content
+                      "one two") == "one two three four five six seven eight"
 
+sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
 assert dictate.main([]) == 1  # no recording given
 assert dictate.main(["/nonexistent.wav"]) == 1  # whisper fails: error, not a crash
 

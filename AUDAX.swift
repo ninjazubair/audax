@@ -486,9 +486,12 @@ final class App: NSObject, NSApplicationDelegate {
         let out = Pipe(), err = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         proc.arguments = [script, wavURL.path]
-        var env = ProcessInfo.processInfo.environment
-        env["AUDAX_CLEANUP"] = settings.cleanup == "off" ? "0" : "1"
-        proc.environment = env
+        // Settings go in on stdin, written before launch: the pipe buffers them, and a script
+        // that exits early cannot leave a write to a closed pipe (SIGPIPE).
+        let input = Pipe()
+        input.fileHandleForWriting.write(configJSON())
+        input.fileHandleForWriting.closeFile()
+        proc.standardInput = input
         proc.standardOutput = out
         proc.standardError = err
         proc.terminationHandler = { p in
@@ -507,16 +510,33 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    func transcribed(status: Int32, text: String) {
+    /// What dictate.py reads on stdin. Never logged: from Task 5 on it carries an API key.
+    func configJSON() -> Data {
+        let config = ["provider": settings.provider,
+                      "model": settings.models[settings.provider] ?? "",
+                      "language": settings.language, "cleanup": settings.cleanup, "api_key": ""]
+        return (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
+    }
+
+    /// `output` is dictate.py's stdout: {"text", "cleanup", "error"}, or plain text from an
+    /// older script.
+    func transcribed(status: Int32, text output: String) {
         phase = .idle
         model.recent = loadRecent()
+        let result = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any]
+        let text = result == nil ? output : result?["text"] as? String ?? ""
         guard status == 0, !text.isEmpty else {
             if settings.sounds { chime.nothing() }
             let nothing = status == exitNothingHeard
             return hud.flash(nothing ? "Didn't catch that" : "Something went wrong: see log")
         }
         if settings.sounds { chime.done() }
-        hud.hide()
+        // Before paste, so that paste's own "Allow AUDAX in Accessibility" flash wins.
+        if result?["cleanup"] as? String == "skipped" {
+            hud.flash("Pasted without clean-up", seconds: 2.5)
+        } else {
+            hud.hide()
+        }
         paste(text)
     }
 

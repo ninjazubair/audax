@@ -46,6 +46,24 @@ assert dictate.apply_subs("der käse ist gut", {"käse": "Käse"}) == "der Käse
 assert dictate.has_words("Äpfel")
 assert dictate.accept("one two three four five six seven eight",  # model dropped content
                       "one two") == "one two three four five six seven eight"
+assert dictate.accept("um uh so like you know I think", "I think.") == "I think."  # fillers
+assert dictate.accept("meet at five no wait actually five thirty",  # self-correction
+                      "Meet at 5:30.") == "Meet at 5:30."
+assert dictate.accept("ähm also ich wollte halt fragen ob wir das meeting verschieben",
+                      "Ich wollte fragen, ob wir das Meeting verschieben.", "de"
+                      ) == "Ich wollte fragen, ob wir das Meeting verschieben."
+
+real_ask_model = dictate.ask_model  # fake model answers, no network
+dictate.ask_model = lambda cfg, system, user: "<dictation>I think.</dictation>"
+assert dictate.cleanup("um uh I think", dict(dictate.DEFAULT_CONFIG)) == ("I think.", "ok", None)
+dictate.ask_model = lambda cfg, system, user: "one two"
+eight = "one two three four five six seven eight"
+assert dictate.cleanup(eight, dict(dictate.DEFAULT_CONFIG)) == (
+    eight, "skipped", "rejected: dropped content")
+dictate.ask_model = lambda cfg, system, user: "Sure! Here is what I think about that. " * 3
+assert dictate.cleanup("what is AEP", dict(dictate.DEFAULT_CONFIG)) == (
+    "what is AEP", "skipped", "rejected: too long")
+dictate.ask_model = real_ask_model
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
 assert dictate.main([]) == 1  # no recording given

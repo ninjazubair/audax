@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 WORD_SUBS_FILE = Path(__file__).with_name("word_subs.json")  # reloaded on every run
 OLLAMA_MODEL = "gemma4"
@@ -107,36 +108,61 @@ def transcribe(wav: Path, vocab: list, language: str) -> str:
     return parse_whisper(out.stdout)
 
 
-def accept(raw: str, cleaned: str) -> str:
-    # ponytail: length heuristic catches the model answering instead of cleaning;
-    # a word-overlap check is the upgrade if it lets bad rewrites through.
-    if not cleaned or len(cleaned) > 1.5 * len(raw) + 20:
-        return raw
-    words = len(raw.split())
-    if words >= 6 and len(cleaned.split()) < 0.5 * words:  # the model dropped content
-        return raw
-    return cleaned
+def count_words(text: str) -> int:
+    return sum(1 for token in text.split() if has_words(token))
+
+
+def content_words(raw: str, language: str) -> int:
+    """Words in raw that are not this language's fillers (multi-word fillers matched first)."""
+    fillers = sorted(FILLERS[language].split(", "), key=lambda f: -len(f.split()))
+    for filler in fillers:
+        words = r"\s+".join(map(re.escape, filler.split()))
+        raw = re.sub(r"\b" + words + r"\b", " ", raw, flags=re.IGNORECASE)
+    return count_words(raw)
+
+
+def reject_reason(raw: str, cleaned: str, language: str = "en") -> Optional[str]:
+    # ponytail: length and word-count heuristics catch the model answering instead of cleaning,
+    # or dropping content; a word-overlap check is the upgrade if bad rewrites get through.
+    if len(cleaned) > 1.5 * len(raw) + 20:
+        return "too long"
+    content = content_words(raw, language)
+    if not cleaned or (content >= 6 and count_words(cleaned) < content / 3):
+        return "dropped content"
+    return None
+
+
+def accept(raw: str, cleaned: str, language: str = "en") -> str:
+    return raw if reject_reason(raw, cleaned, language) else cleaned
+
+
+def ask_model(cfg: dict, system: str, user: str) -> str:
+    """The clean-up model call (local Ollama). Task 5 replaces it with providers.complete."""
+    body = json.dumps({
+        "model": cfg.get("model", OLLAMA_MODEL), "stream": False, "think": False,
+        "keep_alive": "1h", "options": {"temperature": 0},
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+    }).encode()
+    req = urllib.request.Request(cfg.get("url", OLLAMA_URL), body,
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.load(resp)["message"]["content"]
 
 
 def cleanup(text: str, cfg: dict) -> tuple:
     """Returns (text, "ok"|"skipped"|"off", error or None). Any failure gives back the raw text."""
     if cfg["cleanup"] == "off" or not has_words(text):
         return text, "off", None
-    body = json.dumps({
-        "model": cfg.get("model", OLLAMA_MODEL), "stream": False, "think": False,
-        "keep_alive": "1h", "options": {"temperature": 0},
-        "messages": [{"role": "system", "content": prompt_for(cfg["language"], cfg["cleanup"])},
-                     {"role": "user", "content": f"<dictation>{text}</dictation>"}],
-    }).encode()
-    req = urllib.request.Request(cfg.get("url", OLLAMA_URL), body,
-                                 {"Content-Type": "application/json"})
+    system = prompt_for(cfg["language"], cfg["cleanup"])
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            out = json.load(resp)["message"]["content"]
+        out = ask_model(cfg, system, f"<dictation>{text}</dictation>")
     except (OSError, ValueError, KeyError, IndexError) as e:
         return text, "skipped", repr(e)[:200]
     cleaned = out.replace("<dictation>", "").replace("</dictation>", "").strip()
-    return accept(text, cleaned), "ok", None
+    reason = reject_reason(text, cleaned, cfg["language"])
+    if reason:
+        return text, "skipped", "rejected: " + reason
+    return cleaned, "ok", None
 
 
 def process(wav: Path, cfg: dict) -> dict:

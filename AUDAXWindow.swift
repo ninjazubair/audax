@@ -47,7 +47,7 @@ struct CheckRow: View {
     let ok: Bool
     let title: String
     let detail: String
-    let fixTitle: String
+    let fixTitle: String  // "" for no fix button
     let fix: () -> Void
 
     var body: some View {
@@ -60,7 +60,7 @@ struct CheckRow: View {
                 Text(detail).font(.caption).foregroundColor(.secondary)
             }
             Spacer()
-            if !ok { Button(fixTitle, action: fix) }
+            if !ok && !fixTitle.isEmpty { Button(fixTitle, action: fix) }
         }
     }
 }
@@ -149,12 +149,31 @@ struct MainView: View {
             CheckRow(ok: model.engineOK, title: "Speech engine and model",
                      detail: "whisper.cpp with the large-v3-turbo model, on this Mac's GPU.",
                      fixTitle: "Run setup…", fix: actions.runSetup)
-            CheckRow(ok: model.cleanupOK || settings.cleanup == "off", title: "AI clean-up",
-                     detail: settings.cleanup == "off"
-                        ? "Switched off in Settings: you get the raw transcript."
-                        : "Local Ollama with gemma4: punctuation, fillers, corrections.",
-                     fixTitle: "Start Ollama", fix: actions.startOllama)
+            cleanupRow
         }
+    }
+
+    var cleanupRow: some View {
+        let provider = settings.provider, name = settings.models[provider] ?? ""
+        var detail = "Local Ollama with \(name): punctuation, fillers, corrections."
+        if settings.cleanup == "off" {
+            detail = "Switched off in Settings: you get the raw transcript."
+        } else if let to = Settings.recipients[provider] {
+            detail = "\(Settings.providerName(provider)) (\(name)): text is sent to \(to)."
+        }
+        let keyed = Settings.keyProviders.contains(provider)
+        return CheckRow(ok: model.cleanupOK || settings.cleanup == "off", title: "AI clean-up",
+                        detail: detail,
+                        fixTitle: provider == "ollama" ? "Start Ollama" : keyed ? "Settings…" : "",
+                        fix: provider == "ollama" ? actions.startOllama : actions.openSettings)
+    }
+
+    /// Off counts as local: with clean-up switched off no text is sent anywhere.
+    var privacyNote: String {
+        guard settings.cleanup != "off", let to = Settings.recipients[settings.provider] else {
+            return "Audio and text never leave this Mac."
+        }
+        return "Audio stays on this Mac. Text is sent to \(to) for clean-up."
     }
 
     var tryIt: some View {
@@ -201,7 +220,7 @@ struct MainView: View {
             Button("Open log", action: actions.openLog)
             Button("Run setup again", action: actions.runSetup)
             Spacer()
-            Text("Audio and text never leave this Mac.").font(.caption).foregroundColor(.secondary)
+            Text(privacyNote).font(.caption).foregroundColor(.secondary)
         }
     }
 }

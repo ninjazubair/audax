@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn one recording into clean text: transcribe locally, then clean up locally.
+"""Turn one recording into clean text: transcribe locally, then clean up with a model.
 
 Called by AUDAX.app as: dictate.py <recording.wav>, with one JSON object of settings on stdin
 (see DEFAULT_CONFIG; never logged, it carries an API key). Prints one JSON object on stdout,
@@ -7,20 +7,22 @@ Called by AUDAX.app as: dictate.py <recording.wav>, with one JSON object of sett
 printed, 3 nothing usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't
 open file".
 Setting names follow Jason Ko's Windows tool (whisper-voice-dictation config.py) so this
-can merge into it. Nothing leaves the machine: whisper.cpp on the Apple GPU + local Ollama.
+can merge into it. Audio never leaves the machine (whisper.cpp on the Apple GPU); the text
+goes to local Ollama, or to the provider chosen in Settings (providers.py).
 """
+import http.client
 import json
 import re
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
+import providers
+
 WORD_SUBS_FILE = Path(__file__).with_name("word_subs.json")  # reloaded on every run
 OLLAMA_MODEL = "gemma4"
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 DEFAULT_CONFIG = {"provider": "ollama", "model": OLLAMA_MODEL, "language": "en",
                   "cleanup": "full", "api_key": ""}
 LANG_NAMES = {"en": "English", "de": "German"}
@@ -51,7 +53,7 @@ def read_config(stream) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     try:
         data = {} if stream.isatty() else json.loads(stream.read() or "{}")
-    except ValueError:
+    except (OSError, ValueError, AttributeError):  # unreadable, not JSON, or no stream at all
         data = {}
     if isinstance(data, dict):
         cfg.update(data)
@@ -161,28 +163,30 @@ def accept(raw: str, cleaned: str, language: str = "en") -> str:
 
 
 def ask_model(cfg: dict, system: str, user: str) -> str:
-    """The clean-up model call (local Ollama). Task 5 replaces it with providers.complete."""
-    body = json.dumps({
-        "model": cfg.get("model", OLLAMA_MODEL), "stream": False, "think": False,
-        "keep_alive": "1h", "options": {"temperature": 0},
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-    }).encode()
-    req = urllib.request.Request(cfg.get("url", OLLAMA_URL), body,
-                                 {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return json.load(resp)["message"]["content"]
+    """The clean-up model call. Looked up at call time, so tests can replace either name."""
+    return providers.complete(cfg.get("provider", "ollama"), cfg, system, user)
+
+
+CLEANUP_ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError,
+                  http.client.HTTPException)
 
 
 def cleanup(text: str, cfg: dict) -> tuple:
-    """Returns (text, "ok"|"skipped"|"off", error or None). Any failure gives back the raw text."""
+    """Returns (text, "ok"|"skipped"|"off", error or None).
+
+    "skipped" gives back the input text, in two cases: the model call or its reply failed with
+    one of CLEANUP_ERRORS (network, HTTP status, bad JSON, a reply of the wrong shape; error =
+    repr of the exception, kept free of the API key by providers.api_key), or reject_reason
+    refused the answer (error = "rejected: ..."). Any other exception propagates to main: exit 1.
+    """
     if cfg["cleanup"] == "off" or not has_words(text):
         return text, "off", None
     system = prompt_for(cfg["language"], cfg["cleanup"])
     try:
         out = ask_model(cfg, system, f"<dictation>{text}</dictation>")
-    except (OSError, ValueError, KeyError, IndexError) as e:
+        cleaned = out.replace("<dictation>", "").replace("</dictation>", "").strip()
+    except CLEANUP_ERRORS as e:
         return text, "skipped", repr(e)[:200]
-    cleaned = out.replace("<dictation>", "").replace("</dictation>", "").strip()
     reason = reject_reason(text, cleaned, cfg["language"])
     if reason:
         return text, "skipped", "rejected: " + reason

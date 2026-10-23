@@ -1,7 +1,11 @@
 """Run: /usr/bin/python3 test_dictate.py"""
+import contextlib
+import http.client
 import io
+import json
 import sys
 import tempfile
+import urllib.error
 from pathlib import Path
 
 import dictate
@@ -92,6 +96,59 @@ dictate.ask_model = lambda cfg, system, user: user  # echoes the <dictation> tex
 result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
 assert result["final"] == "open Adobe Firefly now"  # applied once, never "Adobe Adobe Firefly"
 dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
+
+assert dictate.read_config(None) == dictate.DEFAULT_CONFIG  # a broken stdin object: defaults
+cfg = dictate.read_config(io.StringIO('{"language": "fr", "cleanup": "on"}'))
+assert cfg["language"] == "en" and cfg["cleanup"] == "full"
+
+
+def boom_fn(provider, cfg, system, user, timeout=20):
+    raise urllib.error.HTTPError("https://api.anthropic.com/v1/messages", 401, "Unauthorized",
+                                 {}, io.BytesIO(b""))
+
+
+real_complete = dictate.providers.complete  # test_cleanup_skipped_on_provider_error
+dictate.providers.complete = boom_fn
+claude = {**dictate.DEFAULT_CONFIG, "provider": "claude", "api_key": "k"}
+skipped = dictate.cleanup("um hello", claude)
+assert skipped[:2] == ("um hello", "skipped") and "401" in skipped[2]
+dictate.providers.complete = real_complete
+
+real_post = dictate.providers.post_json  # malformed replies and transport errors: skipped
+
+
+def reply_with(value):
+    def fake(url, headers, body, timeout):
+        if isinstance(value, Exception):
+            raise value
+        return value
+    return fake
+
+
+for provider, reply in [("ollama", []), ("ollama", {}), ("ollama", {"message": None}),
+                        ("ollama", {"message": {"content": None}}), ("openai", {"choices": []}),
+                        ("claude", {"content": "oops"}),
+                        ("claude", {"content": [{"type": "text", "text": 5}]}),
+                        ("claude", http.client.IncompleteRead(b"")),
+                        ("openai", ValueError("Expecting value"))]:
+    dictate.providers.post_json = reply_with(reply)
+    got = dictate.cleanup("um hello", {**claude, "provider": provider})
+    assert got[:2] == ("um hello", "skipped") and got[2], (provider, reply, got)
+
+SECRET = "sk-test-NEVER-LOG-ME"  # the key reaches neither the log nor the app's stdout
+dictate.transcribe = lambda wav, vocab, language: "um so send the update"
+for key in (SECRET, SECRET + "\nx"):
+    dictate.providers.post_json = reply_with(urllib.error.HTTPError(
+        "https://api.anthropic.com/v1/messages", 401, "Unauthorized", {}, io.BytesIO(b"")))
+    sys.stdin = io.StringIO(json.dumps({"provider": "claude", "model": "m", "api_key": key}))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert dictate.main(["x.wav"]) == 0
+    printed = json.loads(out.getvalue())
+    assert printed["text"] == "um so send the update" and printed["cleanup"] == "skipped"
+    assert "NEVER" not in out.getvalue() and "NEVER" not in dictate.LOG.read_text()
+assert "401" in dictate.LOG.read_text()
+dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
 assert dictate.main([]) == 1  # no recording given

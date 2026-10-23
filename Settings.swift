@@ -1,6 +1,46 @@
-// AUDAX settings: kept in UserDefaults under the property names, and the Settings window that
-// edits them. Opened from the main window's footer and from the menu-bar menu.
+// AUDAX settings: kept in UserDefaults under the property names (API keys in the Keychain), and
+// the Settings window that edits them. Opened from the main window's footer and the menu-bar menu.
+import Security
 import SwiftUI
+
+/// API keys, as generic passwords in the login keychain: never in UserDefaults, files, the
+/// environment or the log. The stable signing identity keeps them readable across rebuilds.
+enum Keychain {
+    static let service = "local.audax"  // accounts: "claude", "openai"
+
+    static func query(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service, kSecAttrAccount as String: account]
+    }
+
+    static func set(_ value: String, account: String) throws {
+        let data = Data(value.utf8)
+        var status = SecItemUpdate(query(account) as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query(account)
+            item[kSecValueData as String] = data
+            status = SecItemAdd(item as CFDictionary, nil)
+        }
+        guard status == errSecSuccess else {
+            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
+        }
+    }
+
+    static func get(account: String) -> String? {
+        var q = query(account)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func delete(account: String) {
+        _ = SecItemDelete(query(account) as CFDictionary)
+    }
+}
 
 /// One correction: dictate.py replaces `wrong` (any case, any spacing) with `right`.
 struct WordSub: Identifiable, Equatable {
@@ -45,6 +85,16 @@ final class Settings: ObservableObject {
 
     static let defaultModels = [
         "ollama": "gemma4", "copilot": "gpt-4.1", "claude": "claude-opus-5-5", "openai": "gpt-4.1"]
+    /// Picker order and labels.
+    static let providers = [("ollama", "Local Ollama"), ("copilot", "GitHub Copilot"),
+                            ("claude", "Claude API"), ("openai", "OpenAI API")]
+    /// Who receives the text, for each provider that is not on this Mac.
+    static let recipients = ["copilot": "GitHub", "claude": "Anthropic", "openai": "OpenAI"]
+    static let keyProviders = ["claude", "openai"]  // the ones that need an API key
+
+    static func providerName(_ provider: String) -> String {
+        providers.first { $0.0 == provider }?.1 ?? provider
+    }
 
     init() {
         let d = UserDefaults.standard
@@ -130,6 +180,8 @@ struct SettingsView: View {
     let actions: Actions
     @State private var wrong = ""  // the Words box's new pair
     @State private var right = ""
+    @State private var key = ""  // typed API key; cleared once saved, never stored elsewhere
+    @State private var keySaved = false
 
     var body: some View {
         Form {
@@ -169,7 +221,6 @@ struct SettingsView: View {
         "full": "Light, plus grammar, word order and recognition errors.",
     ]
 
-    /// Task 5 adds the provider, model and API key here.
     var cleanupBox: some View {
         VStack(alignment: .leading, spacing: 6) {
             Picker("Clean-up", selection: $settings.cleanup) {
@@ -181,8 +232,53 @@ struct SettingsView: View {
             Text(Self.cleanupCaptions[settings.cleanup] ?? "")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            Picker("Provider", selection: $settings.provider) {
+                ForEach(Settings.providers, id: \.0) { tag, label in Text(label).tag(tag) }
+            }
+            TextField("Model", text: Binding(get: { settings.models[settings.provider] ?? "" },
+                                             set: { settings.models[settings.provider] = $0 }))
+            providerExtras
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear(perform: refreshKey)
+        .onChange(of: settings.provider) {
+            key = ""  // a key typed for one provider is never saved under another
+            refreshKey()
+        }
+    }
+
+    /// Fixed height (measured: the key row plus its caption), so switching provider never
+    /// changes the box height: the window sizes to fit only once.
+    var providerExtras: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if Settings.keyProviders.contains(settings.provider) {
+                HStack {
+                    SecureField("API key", text: $key)
+                    Button("Save", action: saveKey).disabled(Self.blank(key))
+                }
+                Text(keySaved ? "Key saved" : "No key").font(.caption).foregroundColor(.secondary)
+            } else if settings.provider == "copilot" {
+                Text("GitHub sign-in is added in the next step.")  // Task 6 replaces this
+                    .font(.caption).foregroundColor(.secondary)
+            }
+        }
+        .frame(height: 43, alignment: .topLeading)
+    }
+
+    func refreshKey() {
+        keySaved = Settings.keyProviders.contains(settings.provider)
+            && Keychain.get(account: settings.provider) != nil
+    }
+
+    func saveKey() {
+        do {
+            try Keychain.set(key.trimmingCharacters(in: .whitespacesAndNewlines),
+                             account: settings.provider)
+        } catch {
+            appendToLog(["warning": "API key not saved: OSStatus \((error as NSError).code)"])
+        }
+        key = ""
+        refreshKey()
     }
 
     var wordsBox: some View {

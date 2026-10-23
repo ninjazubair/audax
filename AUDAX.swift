@@ -20,7 +20,6 @@ let voiceFloorDB: Float = -50  // loudest tick below this is silence, never tran
 let maxSeconds = 300.0  // the only automatic stop
 let tick = 0.05
 let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't open file"
-let ollamaModel = "gemma4"  // keep in step with OLLAMA_MODEL in dictate.py
 
 enum Phase { case idle, recording, transcribing }
 enum RecordMode { case hold, toggle }
@@ -276,10 +275,23 @@ final class App: NSObject, NSApplicationDelegate {
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         model.pasteOK = AXIsProcessTrusted()
         model.engineOK = !needsSetup()
+        switch settings.provider {
+        case "ollama": checkOllama()
+        case "claude", "openai": model.cleanupOK = Keychain.get(account: settings.provider) != nil
+        default: model.cleanupOK = true  // copilot: placeholder until Task 6 checks the sign-in
+        }
+    }
+
+    /// Ollama is running and has the configured model.
+    func checkOllama() {
+        let name = settings.models["ollama"] ?? ""
         guard let url = URL(string: "http://127.0.0.1:11434/api/tags") else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
-            let ok = data.map { String(decoding: $0, as: UTF8.self).contains("\"\(ollamaModel)") } ?? false
-            DispatchQueue.main.async { self.model.cleanupOK = ok }
+            let tags = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
+            let ok = !name.isEmpty && tags.contains("\"\(name)")
+            DispatchQueue.main.async {
+                if self.settings.provider == "ollama" { self.model.cleanupOK = ok }
+            }
         }.resume()
     }
 
@@ -427,7 +439,7 @@ final class App: NSObject, NSApplicationDelegate {
         elapsed = 0
         peakDB = -160
         voice = VoiceMeter()
-        if settings.cleanup != "off" { warmCleanupModel() }
+        if settings.provider == "ollama" && settings.cleanup != "off" { warmCleanupModel() }
         if settings.sounds { chime.start() }
         hud.show()
         // Start the mic just after the 0.09 s tick so it is not recorded, and soon enough not
@@ -511,11 +523,14 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// What dictate.py reads on stdin. Never logged: from Task 5 on it carries an API key.
+    /// What dictate.py reads on stdin. Never logged: it carries the API key, read from the
+    /// Keychain only for the providers that need one.
     func configJSON() -> Data {
-        let config = ["provider": settings.provider,
-                      "model": settings.models[settings.provider] ?? "",
-                      "language": settings.language, "cleanup": settings.cleanup, "api_key": ""]
+        let provider = settings.provider
+        let key = Settings.keyProviders.contains(provider) ? Keychain.get(account: provider) : nil
+        let config = ["provider": provider, "model": settings.models[provider] ?? "",
+                      "language": settings.language, "cleanup": settings.cleanup,
+                      "api_key": key ?? ""]
         return (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
     }
 
@@ -548,7 +563,7 @@ final class App: NSObject, NSApplicationDelegate {
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
         req.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["model": ollamaModel, "keep_alive": "1h"])
+            withJSONObject: ["model": settings.models["ollama"] ?? "", "keep_alive": "1h"])
         URLSession.shared.dataTask(with: req).resume()  // fire and forget; failure = no clean-up
     }
 

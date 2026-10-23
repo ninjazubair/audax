@@ -36,7 +36,8 @@ security find-identity -p codesigning | grep -q "\"$IDENTITY\"" || make_identity
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -o "$APP/Contents/MacOS/AUDAX" \
-  "$DIR/main.swift" "$DIR/AUDAX.swift" "$DIR/AUDAXWindow.swift"
+  "$DIR/main.swift" "$DIR/AUDAX.swift" "$DIR/AUDAXWindow.swift" "$DIR/Shortcut.swift" \
+  "$DIR/Settings.swift"
 cp "$DIR/dictate.py" "$DIR/word_subs.json" "$DIR/setup.sh" "$DIR/assets/AppIcon.icns" \
   "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/setup.sh"

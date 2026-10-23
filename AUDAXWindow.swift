@@ -1,4 +1,5 @@
-// AUDAX main window: status checklist with fix buttons, a test box, recent dictations, settings.
+// AUDAX main window: status checklist with fix buttons, a test box, recent dictations, and a
+// footer that opens Settings.
 // Opened when the user clicks AUDAX in Launchpad/Finder/Dock, and from the menu-bar icon.
 import SwiftUI
 
@@ -17,21 +18,15 @@ final class Model: ObservableObject {
     @Published var cleanupOK = false
     @Published var recent: [Recent] = []
     @Published var scratch = ""
-    @Published var cleanup: Bool { didSet { UserDefaults.standard.set(cleanup, forKey: "cleanup") } }
-    @Published var pause: Double { didSet { UserDefaults.standard.set(pause, forKey: "pause") } }
 
-    init() {
-        cleanup = UserDefaults.standard.object(forKey: "cleanup") as? Bool ?? true
-        pause = UserDefaults.standard.object(forKey: "pause") as? Double ?? 1.5
-    }
-
-    var statusLine: String {
+    /// `talk` and `handsFree` are the current shortcuts' labels, e.g. "⌃⌥D".
+    func statusLine(talk: String, handsFree: String) -> String {
         switch phase {
-        case .recording: return "Listening… release the key, or press it again to finish"
+        case .recording: return "Listening… release \(talk) or press \(handsFree) to finish"
         case .transcribing: return "Transcribing…"
         case .idle:
             return micOK && pasteOK && engineOK
-                ? "Ready. Hold ⌃⌥D and speak, or press ⌃⌥Space to talk hands-free."
+                ? "Ready. Hold \(talk) and speak, or press \(handsFree) to talk hands-free."
                 : "Setup needed: see the red items below."
         }
     }
@@ -44,6 +39,8 @@ struct Actions {
     let runSetup: () -> Void
     let startOllama: () -> Void
     let openLog: () -> Void
+    let openSettings: () -> Void
+    let pauseHotKeys: (Bool) -> Void  // true while a shortcut recorder listens
 }
 
 struct CheckRow: View {
@@ -112,6 +109,7 @@ struct TranscriptRow: View {
 
 struct MainView: View {
     @ObservedObject var model: Model
+    @ObservedObject var settings: Settings
     let actions: Actions
     @FocusState private var tryBoxFocused: Bool
 
@@ -121,7 +119,6 @@ struct MainView: View {
             GroupBox(label: Text("Status")) { checks.padding(6) }
             GroupBox(label: Text("Try it here")) { tryIt.padding(6) }
             GroupBox(label: Text("Transcripts")) { transcripts.padding(6) }
-            GroupBox(label: Text("Settings")) { settings.padding(6) }
             footer
         }
         .padding(20)
@@ -133,7 +130,9 @@ struct MainView: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 56, height: 56)
             VStack(alignment: .leading, spacing: 3) {
                 Text("AUDAX").font(.system(size: 22, weight: .bold))
-                Text(model.statusLine).foregroundColor(.secondary)
+                Text(model.statusLine(talk: settings.talkKey.display,
+                                      handsFree: settings.handsFreeKey.display))
+                    .foregroundColor(.secondary)
             }
             Spacer()
         }
@@ -150,9 +149,10 @@ struct MainView: View {
             CheckRow(ok: model.engineOK, title: "Speech engine and model",
                      detail: "whisper.cpp with the large-v3-turbo model, on this Mac's GPU.",
                      fixTitle: "Run setup…", fix: actions.runSetup)
-            CheckRow(ok: model.cleanupOK || !model.cleanup, title: "AI clean-up",
-                     detail: model.cleanup ? "Local Ollama with gemma4: punctuation, fillers, corrections."
-                                           : "Switched off in Settings: you get the raw transcript.",
+            CheckRow(ok: model.cleanupOK || settings.cleanup == "off", title: "AI clean-up",
+                     detail: settings.cleanup == "off"
+                        ? "Switched off in Settings: you get the raw transcript."
+                        : "Local Ollama with gemma4: punctuation, fillers, corrections.",
                      fixTitle: "Start Ollama", fix: actions.startOllama)
         }
     }
@@ -161,14 +161,15 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 8) {
             TextEditor(text: $model.scratch)
                 .focused($tryBoxFocused)
-                .onAppear { tryBoxFocused = true }  // open AUDAX, press ⌃⌥D, talk
+                .onAppear { tryBoxFocused = true }  // open AUDAX, hold the talk key, talk
                 .font(.body)
                 .frame(height: 70)
                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.3)))
             HStack {
                 Button(model.phase == .recording ? "Stop" : "Start dictation", action: actions.toggle)
                     .disabled(model.phase == .transcribing)
-                Text("The text lands in this box. ⌃⌥D works the same in any other app.")
+                Text("The text lands in this box. \(settings.talkKey.display) works the same "
+                     + "in any other app.")
                     .font(.caption).foregroundColor(.secondary)
             }
         }
@@ -194,26 +195,9 @@ struct MainView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    var settings: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Clean up with local AI (punctuation, filler words, self-corrections)",
-                   isOn: $model.cleanup)
-            Picker("Stop after a pause of", selection: $model.pause) {
-                Text("1 s").tag(1.0)
-                Text("1.5 s").tag(1.5)
-                Text("2 s").tag(2.0)
-                Text("3 s").tag(3.0)
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 380)
-            Text("Shortcut: ⌃⌥D (Control + Option + D). Press it again to stop at once.")
-                .font(.caption).foregroundColor(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     var footer: some View {
         HStack {
+            Button("Settings…", action: actions.openSettings)
             Button("Open log", action: actions.openLog)
             Button("Run setup again", action: actions.runSetup)
             Spacer()
@@ -240,13 +224,14 @@ func loadRecent(limit: Int = 30) -> [Recent] {
 final class MainWindow {
     let window: NSWindow
 
-    init(model: Model, actions: Actions) {
+    init(model: Model, settings: Settings, actions: Actions) {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 540, height: 600),
                           styleMask: [.titled, .closable, .miniaturizable],
                           backing: .buffered, defer: false)
         window.title = "AUDAX"
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: MainView(model: model, actions: actions))
+        window.contentView = NSHostingView(rootView: MainView(model: model, settings: settings,
+                                                              actions: actions))
         window.setContentSize(window.contentView?.fittingSize ?? window.frame.size)
         window.center()
     }

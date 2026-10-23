@@ -1,6 +1,7 @@
-// AUDAX: menu-bar dictation app. Owns two global shortcuts (hold ⌃⌥D to talk, ⌃⌥Space for
-// hands-free), records the mic with a live voice meter, hands the WAV to the bundled dictate.py
-// (local transcribe + clean-up), then pastes the text into the app the user was typing in.
+// AUDAX: menu-bar dictation app. Owns two global shortcuts set in Settings (hold one to talk,
+// press the other for hands-free), records the mic with a live voice meter, hands the WAV to the
+// bundled dictate.py (local transcribe + clean-up), then pastes the text into the app the user
+// was typing in.
 import AVFoundation
 import ApplicationServices
 import Carbon.HIToolbox
@@ -11,11 +12,6 @@ let wavURL = URL(fileURLWithPath: stateDir + "/rec.wav")
 let logPath = stateDir + "/dictation.log"
 let whisperCLI = "/opt/homebrew/bin/whisper-cli"
 let modelPath = stateDir + "/models/ggml-large-v3-turbo-q5_0.bin"
-// Carbon hot keys need no Accessibility permission, unlike a global key monitor.
-let talkKeyCode = UInt32(kVK_ANSI_D)  // hold to record, release to finish
-let talkModifiers = UInt32(controlKey | optionKey)
-let handsFreeKeyCode = UInt32(kVK_Space)  // press to record, press again to finish
-let handsFreeModifiers = UInt32(controlKey | optionKey)
 let minRecordSeconds = 0.3  // shorter than this is "didn't catch that", never transcribed
 let voiceFloorDB: Float = -50  // loudest tick below this is silence, never transcribed
 // ponytail: calibration knob, assumed not measured; room noise on a Mac mic is usually
@@ -192,14 +188,6 @@ struct VoiceMeter {
     }
 }
 
-/// Menu-style label for a hot key, e.g. "⌃⌥D" or "⌃⌥Space".
-func describe(keyCode: UInt32, modifiers: UInt32) -> String {
-    let marks = [(controlKey, "⌃"), (optionKey, "⌥"), (shiftKey, "⇧"), (cmdKey, "⌘")]
-    let mods = marks.filter { modifiers & UInt32($0.0) != 0 }.map { $0.1 }.joined()
-    let names = [UInt32(kVK_ANSI_D): "D", UInt32(kVK_Space): "Space"]
-    return mods + (names[keyCode] ?? "key \(keyCode)")
-}
-
 func appendToLog(_ entry: [String: Any]) {
     var e = entry
     let stamp = DateFormatter()
@@ -222,6 +210,7 @@ final class App: NSObject, NSApplicationDelegate {
     let hud = HUD()
     let chime = Chime()
     var hotKeys: [EventHotKeyRef?] = []  // [talk, hands-free]
+    var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var usr1: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
     var timer: Timer?
@@ -229,13 +218,18 @@ final class App: NSObject, NSApplicationDelegate {
     var targetIsSelf = false  // dictating into AUDAX's own window (its "Try it here" box)
     var voice = VoiceMeter()
     let model = Model()
-    lazy var mainWindow = MainWindow(model: model, actions: Actions(
+    let settings = Settings()
+    lazy var actions = Actions(
         toggle: { [unowned self] in self.toggle() },
         allowMic: { [unowned self] in self.allowMic() },
         allowPaste: { [unowned self] in self.openAccessibility() },
         runSetup: { [unowned self] in self.runSetup() },
         startOllama: { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app")) },
-        openLog: { [unowned self] in self.openLog() }))
+        openLog: { [unowned self] in self.openLog() },
+        openSettings: { [unowned self] in self.showSettings() },
+        pauseHotKeys: { [unowned self] in self.pauseHotKeys($0) })
+    lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
+    lazy var settingsWindow = SettingsWindow(settings: settings, actions: actions)
     var checkTimer: Timer?
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
     var mode = RecordMode.toggle
@@ -245,7 +239,12 @@ final class App: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         buildMenu()
+        installHotKeyHandler()
         registerHotKeys()
+        settings.onShortcutsChanged = { [unowned self] in
+            self.registerHotKeys()
+            self.buildMenu()  // the dictation item shows the talk key
+        }
         // `pkill -USR1 AUDAX` acts like the hands-free key: lets scripts and tests drive the app.
         signal(SIGUSR1, SIG_IGN)
         usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
@@ -269,6 +268,8 @@ final class App: NSObject, NSApplicationDelegate {
         model.recent = loadRecent()
         mainWindow.show()
     }
+
+    @objc func showSettings() { settingsWindow.show() }
 
     func refreshChecks() {
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
@@ -327,7 +328,9 @@ final class App: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open AUDAX…", action: #selector(showWindow),
                                 keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Start / stop dictation   ⌃⌥D",
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
+                                keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Start / stop dictation   \(settings.talkKey.display)",
                                 action: #selector(toggle), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open dictation log", action: #selector(openLog),
                                 keyEquivalent: ""))
@@ -342,8 +345,9 @@ final class App: NSObject, NSApplicationDelegate {
         item.menu = menu
     }
 
-    /// Id 1 = talk key, id 2 = hands-free key. Both report press and release to `hotKey`.
-    func registerHotKeys() {
+    /// Installed once at launch: every registered hot key reports press and release to `hotKey`.
+    /// Carbon hot keys need no Accessibility permission, unlike a global key monitor.
+    func installHotKeyHandler() {
         let specs = [kEventHotKeyPressed, kEventHotKeyReleased].map {
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32($0))
         }
@@ -357,18 +361,31 @@ final class App: NSObject, NSApplicationDelegate {
             app.hotKey(id: hkID.id, pressed: pressed)
             return noErr
         }, specs.count, specs, Unmanaged.passUnretained(self).toOpaque(), nil)
-        let keys = [(talkKeyCode, talkModifiers), (handsFreeKeyCode, handsFreeModifiers)]
-        for (i, (code, modifiers)) in keys.enumerated() {
+    }
+
+    /// Id 1 = talk key, id 2 = hands-free key. Drops the old registrations first, so it runs
+    /// again whenever the shortcuts change; registers nothing while paused.
+    func registerHotKeys() {
+        hotKeys.compactMap { $0 }.forEach { UnregisterEventHotKey($0) }
+        hotKeys = []
+        guard !hotKeysPaused else { return }
+        for (i, key) in [settings.talkKey, settings.handsFreeKey].enumerated() {
             var ref: EventHotKeyRef?
             let id = EventHotKeyID(signature: 0x4155_4458, id: UInt32(i + 1))
             let events = GetApplicationEventTarget()
-            let status = RegisterEventHotKey(code, modifiers, id, events, 0, &ref)
+            let status = RegisterEventHotKey(key.keyCode, key.modifiers, id, events, 0, &ref)
             if status != noErr {
-                let combo = describe(keyCode: code, modifiers: modifiers)
-                alert("\(combo) is taken by another app (error \(status)).")
+                alert("\(key.display) is taken by another app (error \(status)). "
+                      + "Pick another one in Settings.")
             }
             hotKeys.append(ref)
         }
+    }
+
+    /// A Settings recorder pauses the hot keys so it can see (and reject) the keys pressed.
+    func pauseHotKeys(_ paused: Bool) {
+        hotKeysPaused = paused
+        registerHotKeys()
     }
 
     /// Talk key: press starts, release finishes. Hands-free key: press starts, next press
@@ -408,11 +425,12 @@ final class App: NSObject, NSApplicationDelegate {
         elapsed = 0
         peakDB = -160
         voice = VoiceMeter()
-        if model.cleanup { warmCleanupModel() }
-        chime.start()
+        if settings.cleanup != "off" { warmCleanupModel() }
+        if settings.sounds { chime.start() }
         hud.show()
-        // Start the mic just after the chime so the chime is not recorded.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+        // Start the mic just after the 0.09 s tick so it is not recorded, and soon enough not
+        // to clip the first syllable of someone who talks the moment they press.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self, self.phase == .recording else { return }
             self.startRecorder()
         }
@@ -420,10 +438,10 @@ final class App: NSObject, NSApplicationDelegate {
 
     func startRecorder() {
         guard recorder == nil else { return }
-        let settings: [String: Any] = [
+        let format: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
-        guard let rec = try? AVAudioRecorder(url: wavURL, settings: settings), rec.record() else {
+        guard let rec = try? AVAudioRecorder(url: wavURL, settings: format), rec.record() else {
             phase = .idle
             hud.hide()
             return alert("Could not start recording from the microphone.")
@@ -454,7 +472,7 @@ final class App: NSObject, NSApplicationDelegate {
         appendToLog(["peak_db": Double(peakDB.rounded()), "seconds": (elapsed * 10).rounded() / 10])
         guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
-            chime.nothing()
+            if settings.sounds { chime.nothing() }
             return hud.flash("Didn't catch that")
         }
         phase = .transcribing
@@ -468,7 +486,7 @@ final class App: NSObject, NSApplicationDelegate {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         proc.arguments = [script, wavURL.path]
         var env = ProcessInfo.processInfo.environment
-        env["AUDAX_CLEANUP"] = model.cleanup ? "1" : "0"
+        env["AUDAX_CLEANUP"] = settings.cleanup == "off" ? "0" : "1"
         proc.environment = env
         proc.standardOutput = out
         proc.standardError = err
@@ -492,11 +510,11 @@ final class App: NSObject, NSApplicationDelegate {
         phase = .idle
         model.recent = loadRecent()
         guard status == 0, !text.isEmpty else {
-            chime.nothing()
+            if settings.sounds { chime.nothing() }
             let nothing = status == exitNothingHeard
             return hud.flash(nothing ? "Didn't catch that" : "Something went wrong: see log")
         }
-        chime.done()
+        if settings.sounds { chime.done() }
         hud.hide()
         paste(text)
     }

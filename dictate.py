@@ -31,6 +31,7 @@ WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
 STATE = Path.home() / ".cache/mac-dictation"
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 LOG = STATE / "dictation.log"
+USER_SUBS = STATE / "word_subs.json"  # the user's own corrections, edited in Settings
 
 CLEANUP_PROMPT = (
     "You clean up dictated text. The text is in {lang}; keep it in {lang} and never translate. "
@@ -67,14 +68,37 @@ def prompt_for(language: str, level: str) -> str:
     return prompt + FULL_CLEANUP if level == "full" else prompt
 
 
-def load_subs() -> dict:
+def read_subs(path: Path) -> dict:
+    """Phrase → replacement pairs from one JSON object file. ValueError if it is not one."""
     try:
-        data = json.loads(WORD_SUBS_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise ValueError("invalid JSON") from None
     if not isinstance(data, dict):
-        return {}
-    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and k.strip()}
+        raise ValueError("not an object")
+    return {k: v for k, v in data.items()
+            if isinstance(k, str) and isinstance(v, str) and k.strip()}
+
+
+def phrase_key(phrase: str) -> str:
+    return " ".join(phrase.lower().split())  # how apply_subs matches: any case, any spacing
+
+
+def load_subs() -> dict:
+    """The bundled pairs, then the user's own; a user pair replaces a bundled one."""
+    try:
+        subs = read_subs(WORD_SUBS_FILE)
+    except (OSError, ValueError):
+        subs = {}
+    try:
+        user = read_subs(USER_SUBS)
+    except FileNotFoundError:  # the user has not added a word yet
+        return subs
+    except (OSError, ValueError) as e:
+        log({"warning": "word_subs.json ignored: " + (getattr(e, "strerror", None) or str(e))})
+        return subs
+    mine = {phrase_key(k) for k in user}
+    return {**{k: v for k, v in subs.items() if phrase_key(k) not in mine}, **user}
 
 
 def apply_subs(text: str, subs: dict) -> str:
@@ -171,6 +195,7 @@ def process(wav: Path, cfg: dict) -> dict:
     raw = apply_subs(transcribe(wav, list(subs.values()), cfg["language"]), subs)
     t1 = time.time()
     final, status, error = cleanup(raw, cfg)
+    final = apply_subs(final, subs)  # again, so the model cannot undo a correction
     t2 = time.time()
     return {"raw": raw, "final": final, "cleanup": status, "error": error,
             "stt_s": round(t1 - t0, 2), "llm_s": round(t2 - t1, 2),

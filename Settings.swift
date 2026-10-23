@@ -2,6 +2,13 @@
 // edits them. Opened from the main window's footer and from the menu-bar menu.
 import SwiftUI
 
+/// One correction: dictate.py replaces `wrong` (any case, any spacing) with `right`.
+struct WordSub: Identifiable, Equatable {
+    let id = UUID()
+    var wrong: String
+    var right: String
+}
+
 final class Settings: ObservableObject {
     @Published var talkKey: Shortcut {
         didSet {
@@ -30,6 +37,10 @@ final class Settings: ObservableObject {
     @Published var models: [String: String] {  // provider → model name
         didSet { UserDefaults.standard.set(models, forKey: "models") }
     }
+    @Published var wordSubs: [WordSub] {  // the user's own corrections, in userSubsPath
+        didSet { saveWordSubs() }
+    }
+    var wordSubsUnreadable = false  // the file exists but is not a JSON object
     var onShortcutsChanged: (() -> Void)?
 
     static let defaultModels = [
@@ -45,6 +56,48 @@ final class Settings: ObservableObject {
         provider = d.string(forKey: "provider") ?? "ollama"
         let stored = d.dictionary(forKey: "models") as? [String: String] ?? [:]
         models = Settings.defaultModels.merging(stored) { $1 }
+        let subs = Settings.readWordSubs()
+        wordSubs = subs ?? []
+        wordSubsUnreadable = subs == nil
+    }
+
+    /// nil when the file exists but is not a JSON object; [] when there is no file yet.
+    static func readWordSubs() -> [WordSub]? {
+        guard let data = FileManager.default.contents(atPath: userSubsPath) else { return [] }
+        guard let pairs = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        return pairs.compactMap { wrong, right in
+            guard let right = right as? String, !wrong.trimmingCharacters(in: .whitespaces).isEmpty
+            else { return nil }
+            return WordSub(wrong: wrong, right: right)
+        }.sorted { $0.wrong.lowercased() < $1.wrong.lowercased() }
+    }
+
+    /// Replaces a pair with the same misspelling, any case; otherwise appends.
+    func addWordSub(wrong: String, right: String) {
+        let sub = WordSub(wrong: wrong.trimmingCharacters(in: .whitespaces),
+                          right: right.trimmingCharacters(in: .whitespaces))
+        if let i = wordSubs.firstIndex(where: { $0.wrong.lowercased() == sub.wrong.lowercased() }) {
+            wordSubs[i] = sub
+        } else {
+            wordSubs.append(sub)
+        }
+    }
+
+    /// dictate.py re-reads the file on every dictation, so a change applies to the next one.
+    func saveWordSubs() {
+        if wordSubsUnreadable {  // keep the user's hand-edited file instead of overwriting it
+            // ponytail: one aside copy; a second unreadable file is overwritten if the move fails.
+            try? FileManager.default.moveItem(atPath: userSubsPath,
+                                              toPath: userSubsPath + ".unreadable")
+            wordSubsUnreadable = false
+        }
+        let pairs = Dictionary(wordSubs.map { ($0.wrong, $0.right) }) { _, last in last }
+        guard let data = try? JSONSerialization.data(withJSONObject: pairs,
+                                                     options: [.prettyPrinted, .sortedKeys])
+        else { return }
+        try? data.write(to: URL(fileURLWithPath: userSubsPath), options: .atomic)
     }
 
     static func shortcut(_ data: Data?) -> Shortcut? {
@@ -68,6 +121,8 @@ final class Settings: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     let actions: Actions
+    @State private var wrong = ""  // the Words box's new pair
+    @State private var right = ""
 
     var body: some View {
         Form {
@@ -123,11 +178,39 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// Task 4 puts the misspelling → correct word table here.
     var wordsBox: some View {
-        Text("Word corrections are not available yet.")
-            .foregroundColor(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField("Misspelled", text: $wrong, prompt: Text("Misspelled")).labelsHidden()
+                TextField("Correct", text: $right, prompt: Text("Correct")).labelsHidden()
+                Button("Add") {
+                    settings.addWordSub(wrong: wrong, right: right)
+                    wrong = ""
+                    right = ""
+                }
+                .disabled(Self.blank(wrong) || Self.blank(right))
+            }
+            List(settings.wordSubs) { sub in
+                HStack {
+                    Text("\(sub.wrong) → \(sub.right)")
+                    Spacer()
+                    Button { settings.wordSubs.removeAll { $0.id == sub.id } } label: {
+                        Label("Remove", systemImage: "trash").labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove")
+                }
+            }
+            .frame(height: 150)  // the window sizes to fit once, so the list must not grow
+            Text("Built-in corrections (Workfront, RTCDP, …) stay active.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    static func blank(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespaces).isEmpty
     }
 }
 

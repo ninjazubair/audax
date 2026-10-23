@@ -7,6 +7,7 @@ from pathlib import Path
 import dictate
 
 dictate.LOG = Path(tempfile.mkdtemp()) / "test.log"  # keep the real log clean
+dictate.USER_SUBS = Path(tempfile.mkdtemp()) / "word_subs.json"  # never the user's real file
 
 assert dictate.apply_subs("Check Work Front and real time CDP", {
     "work front": "Workfront", "real time cdp": "RTCDP"}) == "Check Workfront and RTCDP"
@@ -64,6 +65,28 @@ dictate.ask_model = lambda cfg, system, user: "Sure! Here is what I think about 
 assert dictate.cleanup("what is AEP", dict(dictate.DEFAULT_CONFIG)) == (
     "what is AEP", "skipped", "rejected: too long")
 dictate.ask_model = real_ask_model
+
+assert dictate.load_subs()["work front"] == "Workfront"  # no user file yet: bundled only
+assert not dictate.LOG.exists()  # a missing user file is normal, never logged
+dictate.USER_SUBS.write_text('{"audacks": "AUDAX", "work front": "WF"}')
+subs = dictate.load_subs()
+assert subs["audacks"] == "AUDAX" and subs["work front"] == "WF"  # user wins over bundled
+dictate.USER_SUBS.write_text('{"Work  Front": "WF"}')  # user wins in any case or spacing
+assert dictate.apply_subs("the work front update", dictate.load_subs()) == "the WF update"
+dictate.USER_SUBS.write_text("{broken")
+assert dictate.load_subs()["work front"] == "Workfront"  # malformed: bundled still applies
+assert dictate.LOG.read_text().count('"warning": "word_subs.json ignored: invalid JSON"') == 1
+dictate.USER_SUBS.write_text('["audacks", "AUDAX"]')
+assert "audacks" not in dictate.load_subs()
+assert dictate.LOG.read_text().count("word_subs.json ignored: not an object") == 1
+
+dictate.USER_SUBS.write_text('{"audacks": "AUDAX"}')
+real_transcribe = dictate.transcribe  # a model must not undo a correction
+dictate.transcribe = lambda wav, vocab, language: "send the work front update"
+dictate.ask_model = lambda cfg, system, user: "<dictation>Send the work front update.</dictation>"
+result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
+assert result["final"] == "Send the Workfront update." and result["cleanup"] == "ok"
+dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
 assert dictate.main([]) == 1  # no recording given

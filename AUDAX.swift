@@ -10,6 +10,7 @@ import Cocoa
 let stateDir = NSHomeDirectory() + "/.cache/mac-dictation"
 let wavURL = URL(fileURLWithPath: stateDir + "/rec.wav")
 let logPath = stateDir + "/dictation.log"
+let userSubsPath = stateDir + "/word_subs.json"  // dictate.py's USER_SUBS, not the bundled file
 let whisperCLI = "/opt/homebrew/bin/whisper-cli"
 let modelPath = stateDir + "/models/ggml-large-v3-turbo-q5_0.bin"
 let minRecordSeconds = 0.3  // shorter than this is "didn't catch that", never transcribed

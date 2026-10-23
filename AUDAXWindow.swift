@@ -27,11 +27,11 @@ final class Model: ObservableObject {
 
     var statusLine: String {
         switch phase {
-        case .recording: return "Listening… pause or press ⌃⌥D to finish"
+        case .recording: return "Listening… release the key, or press it again to finish"
         case .transcribing: return "Transcribing…"
         case .idle:
             return micOK && pasteOK && engineOK
-                ? "Ready. Press ⌃⌥D in any app and speak."
+                ? "Ready. Hold ⌃⌥D and speak, or press ⌃⌥Space to talk hands-free."
                 : "Setup needed: see the red items below."
         }
     }

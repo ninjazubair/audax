@@ -12,6 +12,8 @@ let wavURL = URL(fileURLWithPath: stateDir + "/rec.wav")
 let logPath = stateDir + "/dictation.log"
 let userSubsPath = stateDir + "/word_subs.json"  // dictate.py's USER_SUBS, not the bundled file
 let whisperCLI = "/opt/homebrew/bin/whisper-cli"
+let whisperServerBinary = "/opt/homebrew/bin/whisper-server"
+let whisperServerPort = 18777  // dictate.py's WHISPER_SERVER
 let modelPath = stateDir + "/models/ggml-large-v3-turbo-q5_0.bin"
 let minRecordSeconds = 0.3  // shorter than this is "didn't catch that", never transcribed
 let voiceFloorDB: Float = -50  // loudest tick below this is silence, never transcribed
@@ -269,10 +271,13 @@ final class App: NSObject, NSApplicationDelegate {
     let script = Bundle.main.path(forResource: "dictate", ofType: "py") ?? ""
     let hud = HUD()
     let chime = Chime()
+    let whisperServer = WhisperServer(binary: whisperServerBinary, model: modelPath,
+                                      port: whisperServerPort)
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
     var usr1: DispatchSourceSignal?
+    var term: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
     var timer: Timer?
     var target: NSRunningApplication?  // the app that had focus when the shortcut was pressed
@@ -308,6 +313,7 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        whisperServer.keepAlive()  // first, so the model loads while the rest starts up
         buildMenu()
         installHotKeyHandler()
         startKeyTap()
@@ -325,9 +331,16 @@ final class App: NSObject, NSApplicationDelegate {
         usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         usr1?.setEventHandler { [weak self] in self?.toggle() }
         usr1?.resume()
+        // `pkill AUDAX` (build.sh --install) quits as the menu does, so applicationWillTerminate
+        // stops whisper-server instead of leaving it to launchd with 861 MB and the port.
+        signal(SIGTERM, SIG_IGN)
+        term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term?.setEventHandler { NSApp.terminate(nil) }
+        term?.resume()
         refreshIcon()
         checkTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.refreshChecks()
+            self?.whisperServer.keepAlive()  // restarts it, at most once a minute
         }
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 240,
                                               repeats: true) { [weak self] _ in
@@ -335,6 +348,10 @@ final class App: NSObject, NSApplicationDelegate {
         }
         warmCleanupModel()  // now, not 4 minutes from now
         showWindow()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        whisperServer.stop()
     }
 
     /// Clicking AUDAX in Launchpad, Finder or the Dock while it runs opens the window.
@@ -735,7 +752,7 @@ final class App: NSObject, NSApplicationDelegate {
         let key = Settings.keyProviders.contains(provider) ? Keychain.get(account: provider) : nil
         let config = ["provider": provider, "model": settings.models[provider] ?? "",
                       "language": settings.language, "cleanup": settings.cleanup,
-                      "api_key": key ?? ""]
+                      "api_key": key ?? "", "whisper_path": whisperServer.requestPath]
         return (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
     }
 

@@ -41,7 +41,7 @@ security find-identity -p codesigning | grep -q "\"$IDENTITY\"" || make_identity
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -target "arm64-apple-macos$MIN_MACOS" -o "$APP/Contents/MacOS/AUDAX" \
   "$DIR/main.swift" "$DIR/AUDAX.swift" "$DIR/AUDAXWindow.swift" "$DIR/Shortcut.swift" \
-  "$DIR/Settings.swift" "$DIR/KeyTap.swift"
+  "$DIR/Settings.swift" "$DIR/KeyTap.swift" "$DIR/WhisperServer.swift"
 cp "$DIR/dictate.py" "$DIR/providers.py" "$DIR/word_subs.json" "$DIR/setup.sh" \
   "$DIR/assets/AppIcon.icns" "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/setup.sh"
@@ -78,7 +78,11 @@ codesign --sign "$IDENTITY" "$DMG"
 echo "Built: $DMG"
 
 if [ "${1:-}" = "--install" ]; then
+  # SIGTERM: AUDAX quits as from its menu and stops its whisper-server. Wait for that, so
+  # `open` below starts the new app instead of finding the old one still quitting.
   pkill -x AUDAX || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x AUDAX >/dev/null || break; sleep 0.3; done
+  pkill -9 -x AUDAX || true  # still there after 3 s; its next launch stops the orphaned server
   rm -rf /Applications/AUDAX.app  # the previous version stays reinstallable from its DMG
   cp -R "$APP" /Applications/
   "$LSREGISTER" -f /Applications/AUDAX.app  # refresh name and icon in Launchpad/Finder

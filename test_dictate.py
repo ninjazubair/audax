@@ -1,10 +1,14 @@
 """Run: /usr/bin/python3 test_dictate.py"""
 import contextlib
+import email
 import http.client
+import http.server
 import io
 import json
+import socket
 import sys
 import tempfile
+import threading
 import urllib.error
 from pathlib import Path
 
@@ -88,12 +92,17 @@ assert dictate.LOG.read_text().count("word_subs.json ignored: not an object") ==
 
 dictate.USER_SUBS.write_text('{"audacks": "AUDAX"}')
 real_transcribe = dictate.transcribe  # a model must not undo a correction
-dictate.transcribe = lambda wav, vocab, language: "send the work front update"
+urls = []
+dictate.transcribe = lambda wav, vocab, language, url: urls.append(url) or (
+    "send the work front update", "server")
 dictate.ask_model = lambda cfg, system, user: "<dictation>Send the work front update.</dictation>"
-result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
+result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full",
+                                         "whisper_path": "/audax-x"})
 assert result["final"] == "Send the Workfront update." and result["cleanup"] == "ok"
+assert result["stt"] == "server"  # which speech-to-text path ran, for the log
+assert urls == ["http://127.0.0.1:18777/audax-x/inference"]  # the app's per-launch path
 dictate.USER_SUBS.write_text('{"firefly": "Adobe Firefly"}')  # replacement holds its own key
-dictate.transcribe = lambda wav, vocab, language: "open firefly now"
+dictate.transcribe = lambda wav, vocab, language, url: ("open firefly now", "cli")
 dictate.ask_model = lambda cfg, system, user: user  # echoes the <dictation> text unchanged
 result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
 assert result["final"] == "open Adobe Firefly now"  # applied once, never "Adobe Adobe Firefly"
@@ -102,6 +111,8 @@ dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
 assert dictate.read_config(None) == dictate.DEFAULT_CONFIG  # a broken stdin object: defaults
 cfg = dictate.read_config(io.StringIO('{"language": "fr", "cleanup": "on"}'))
 assert cfg["language"] == "en" and cfg["cleanup"] == "full"
+assert dictate.read_config(io.StringIO('{"whisper_path": 7}'))["whisper_path"] == ""
+assert dictate.read_config(io.StringIO('{"whisper_path": "/a"}'))["whisper_path"] == "/a"
 
 
 def boom_fn(provider, cfg, system, user, timeout=20):
@@ -144,7 +155,7 @@ assert got[:2] == ("um hello", "skipped") and "not signed in" in got[2], got
 dictate.providers.gh_token = real_gh
 
 SECRET = "sk-test-NEVER-LOG-ME"  # the key reaches neither the log nor the app's stdout
-dictate.transcribe = lambda wav, vocab, language: "um so send the update"
+dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
 for key in (SECRET, SECRET + "\nx"):
     dictate.providers.post_json = reply_with(urllib.error.HTTPError(
         "https://api.anthropic.com/v1/messages", 401, "Unauthorized", {}, io.BytesIO(b"")))
@@ -156,7 +167,7 @@ for key in (SECRET, SECRET + "\nx"):
     assert printed["text"] == "um so send the update" and printed["cleanup"] == "skipped"
     assert "NEVER" not in out.getvalue() and "NEVER" not in dictate.LOG.read_text()
 assert "401" in dictate.LOG.read_text()
-dictate.transcribe = lambda wav, vocab, language: "der Käse ist gut"  # stays unescaped
+dictate.transcribe = lambda wav, vocab, language, url: ("der Käse ist gut", "cli")  # unescaped
 sys.stdin = io.StringIO(json.dumps({"language": "de", "cleanup": "off"}))
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
@@ -164,6 +175,66 @@ with contextlib.redirect_stdout(out):
 assert '"text": "der Käse ist gut"' in out.getvalue()
 assert '"raw": "der Käse ist gut"' in dictate.LOG.read_text(encoding="utf-8")
 dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
+
+ct, body = dictate.multipart({"temperature": "0", "language": "de"}, "file", "rec.wav", b"RIFF....")
+assert ct.startswith("multipart/form-data; boundary=") and b'name="language"\r\n\r\nde' in body
+assert b'filename="rec.wav"' in body and body.endswith(b"--\r\n")
+form = email.message_from_bytes(b"Content-Type: " + ct.encode() + b"\r\n\r\n" + body)
+assert {part.get_param("name", header="content-disposition"): part.get_payload(decode=True)
+        for part in form.get_payload()} == {"temperature": b"0", "language": b"de",
+                                             "file": b"RIFF...."}
+
+
+class FakeWhisper(http.server.BaseHTTPRequestHandler):  # a real local server: the success path
+    reply = b'{"text": " [Music]\\n Send the update.\\n"}'
+    got = b""
+
+    def do_POST(self):
+        FakeWhisper.got = self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(FakeWhisper.reply)
+
+    def log_message(self, *args):
+        pass
+
+
+fake = http.server.HTTPServer(("127.0.0.1", 0), FakeWhisper)
+threading.Thread(target=fake.serve_forever, daemon=True).start()
+url = "http://127.0.0.1:%d/inference" % fake.server_port
+wav = Path(tempfile.mkdtemp()) / "rec.wav"
+wav.write_bytes(b"RIFF....WAVE")
+assert dictate.transcribe(wav, ["Workfront", "Käse"], "de", server_url=url) == (
+    "Send the update.", "server")  # non-speech tags cleaned as for whisper-cli
+for field in ('name="temperature"\r\n\r\n0\r\n', 'name="response_format"\r\n\r\njson\r\n',
+              'name="language"\r\n\r\nde\r\n', 'name="prompt"\r\n\r\nWorkfront, Käse\r\n'):
+    assert field.encode() in FakeWhisper.got, field
+assert b"RIFF....WAVE" in FakeWhisper.got
+assert dictate.transcribe_server(wav, [], "en", url=url) == "Send the update."
+assert b'name="prompt"' not in FakeWhisper.got  # no vocabulary, no prompt field
+
+real_cli = dictate.transcribe_cli  # test_transcribe_falls_back
+calls = []
+dictate.transcribe_cli = lambda wav, vocab, language: calls.append("cli") or "fallback text"
+closed = "http://127.0.0.1:9/inference"  # a real closed port: connection refused
+assert dictate.transcribe(wav, [], "en", server_url=closed) == ("fallback text", "cli")
+FakeWhisper.reply = b'{"error": "failed to read audio data"}'  # the server's own failure reply
+assert dictate.transcribe(wav, [], "en", server_url=url) == ("fallback text", "cli")
+FakeWhisper.reply = b"<html>not json</html>"
+assert dictate.transcribe(wav, [], "en", server_url=url) == ("fallback text", "cli")
+assert calls == ["cli", "cli", "cli"]
+dictate.transcribe_cli = real_cli
+fake.shutdown()
+mute = socket.socket()  # accepts the connection, never answers: a timeout is an OSError too
+mute.bind(("127.0.0.1", 0))
+mute.listen()
+try:
+    dictate.transcribe_server(wav, [], "en", url="http://127.0.0.1:%d/inference"
+                              % mute.getsockname()[1], timeout=0.3)
+    raise AssertionError("no timeout")
+except OSError:
+    pass
+mute.close()
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's
 err = io.StringIO()

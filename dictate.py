@@ -21,6 +21,8 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -29,12 +31,15 @@ import providers
 WORD_SUBS_FILE = Path(__file__).with_name("word_subs.json")  # reloaded on every run
 OLLAMA_MODEL = "gemma4"
 DEFAULT_CONFIG = {"provider": "ollama", "model": OLLAMA_MODEL, "language": "en",
-                  "cleanup": "full", "api_key": ""}
+                  "cleanup": "full", "api_key": "", "whisper_path": ""}
 LANG_NAMES = {"en": "English", "de": "German"}
 FILLERS = {"en": "um, uh, you know, like", "de": "ähm, äh, also, halt, sozusagen"}
 
 # Absolute path: apps launch without Homebrew on PATH. install.command installs it.
 WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
+# whisper-server, kept running by the app. It answers only under a random path per app launch,
+# which the app passes on stdin as "whisper_path", so a web page cannot reach it.
+WHISPER_SERVER = "http://127.0.0.1:18777"
 STATE = Path.home() / ".cache/mac-dictation"
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 LOG = STATE / "dictation.log"
@@ -66,6 +71,8 @@ def read_config(stream) -> dict:
         cfg["language"] = "en"
     if cfg["cleanup"] not in ("off", "light", "full"):
         cfg["cleanup"] = "full"
+    if not isinstance(cfg["whisper_path"], str):
+        cfg["whisper_path"] = ""
     return cfg
 
 
@@ -129,7 +136,7 @@ def has_words(text: str) -> bool:
     return bool(re.search(r"[^\W_]", text))
 
 
-def transcribe(wav: Path, vocab: list, language: str) -> str:
+def transcribe_cli(wav: Path, vocab: list, language: str) -> str:
     cmd = [WHISPER_CLI, "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", language, "-nt", "-np"]
     if vocab:
         cmd += ["--prompt", ", ".join(vocab)]  # biases spelling of product names
@@ -137,6 +144,39 @@ def transcribe(wav: Path, vocab: list, language: str) -> str:
     if out.returncode != 0:
         raise RuntimeError(f"whisper-cli failed: {out.stderr.strip()[-300:]}")
     return parse_whisper(out.stdout)
+
+
+def multipart(fields: dict, file_field: str, filename: str, data: bytes) -> tuple:
+    """(content_type, body) of a multipart/form-data POST: the text fields, then one file."""
+    boundary = "audax-" + uuid.uuid4().hex
+    head = "".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
+                   f"{value}\r\n" for name, value in fields.items())
+    head += (f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+             f'filename="{filename}"\r\nContent-Type: audio/wav\r\n\r\n')
+    body = head.encode() + data + f"\r\n--{boundary}--\r\n".encode()
+    return "multipart/form-data; boundary=" + boundary, body
+
+
+def transcribe_server(wav: Path, vocab: list, language: str, url: str,
+                      timeout: float = 60) -> str:
+    """The transcript from the app's resident whisper-server: no model load per call."""
+    fields = {"temperature": "0", "response_format": "json", "language": language}
+    if vocab:
+        fields["prompt"] = ", ".join(vocab)
+    content_type, body = multipart(fields, "file", wav.name, wav.read_bytes())
+    req = urllib.request.Request(url, body, {"Content-Type": content_type})
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback: no proxy
+    with direct.open(req, timeout=timeout) as resp:
+        return parse_whisper(json.load(resp)["text"])
+
+
+def transcribe(wav: Path, vocab: list, language: str, server_url: str) -> tuple:
+    """(text, "server"|"cli"). whisper-cli whenever the server is not running, refuses, times
+    out or replies without a "text" (OSError covers URLError, HTTPError and timeouts)."""
+    try:
+        return transcribe_server(wav, vocab, language, url=server_url), "server"
+    except (OSError, ValueError, KeyError):
+        return transcribe_cli(wav, vocab, language), "cli"
 
 
 def count_words(text: str) -> int:
@@ -202,7 +242,9 @@ def cleanup(text: str, cfg: dict) -> tuple:
 def process(wav: Path, cfg: dict) -> dict:
     subs = load_subs()
     t0 = time.time()
-    raw = apply_subs(transcribe(wav, list(subs.values()), cfg["language"]), subs)
+    url = WHISPER_SERVER + cfg["whisper_path"] + "/inference"
+    text, stt = transcribe(wav, list(subs.values()), cfg["language"], url)
+    raw = apply_subs(text, subs)
     t1 = time.time()
     final, status, error = cleanup(raw, cfg)
     # Again, so the model cannot undo a correction; only pairs that are safe to apply twice
@@ -211,7 +253,7 @@ def process(wav: Path, cfg: dict) -> dict:
     final = apply_subs(final, again)
     t2 = time.time()
     return {"raw": raw, "final": final, "cleanup": status, "error": error,
-            "stt_s": round(t1 - t0, 2), "llm_s": round(t2 - t1, 2),
+            "stt": stt, "stt_s": round(t1 - t0, 2), "llm_s": round(t2 - t1, 2),
             "lang": cfg["language"], "provider": cfg["provider"], "level": cfg["cleanup"]}
 
 

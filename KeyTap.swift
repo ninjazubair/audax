@@ -8,6 +8,8 @@ import Cocoa
 final class KeyTap {
     /// (shortcut id, pressed), on the main queue: 1 = talk, 2 = hands-free, as for Carbon.
     var onKey: ((UInt32, Bool) -> Void)?
+    /// A key pressed with Fn down that is no shortcut (Fn+Delete, Fn+←…), on the main queue.
+    var onFnChord: (() -> Void)?
     private var port: CFMachPort?
     private var shortcuts: [(id: UInt32, shortcut: Shortcut)] = []
     private var fnDown = false
@@ -68,7 +70,8 @@ final class KeyTap {
     }
 
     /// Fn+key. The release is matched by key alone, so letting go of Fn first still ends a hold.
-    /// Auto-repeats are swallowed without a report.
+    /// Auto-repeats are swallowed without a report. An Fn+key that is no shortcut passes through
+    /// and is reported as a chord (its repeats are not).
     private func key(_ event: CGEvent, down: Bool) -> Bool {
         let code = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
         if !down {
@@ -80,8 +83,12 @@ final class KeyTap {
         guard fnDown, event.flags.contains(.maskSecondaryFn) else { return false }
         let mods = KeyTap.carbon(event.flags) | Shortcut.fnMask
         let pressed = Shortcut(keyCode: code, modifiers: mods)
-        guard let id = shortcuts.first(where: { $0.shortcut == pressed })?.id else { return false }
-        if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+        let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        guard let id = shortcuts.first(where: { $0.shortcut == pressed })?.id else {
+            if !repeated { DispatchQueue.main.async { [weak self] in self?.onFnChord?() } }
+            return false  // keeps its macOS meaning (forward delete, Home, F-key…)
+        }
+        if !repeated {
             held[code] = id
             report(id, true)
         }

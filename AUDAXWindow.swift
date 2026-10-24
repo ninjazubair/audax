@@ -28,7 +28,7 @@ final class Model: ObservableObject {
         switch phase {
         case .recording where mode == .hold:
             return "Listening… release \(talk) to finish, or press \(handsFree) to go hands-free"
-        case .recording: return "Listening hands-free… press \(talk) or \(handsFree) to finish"
+        case .recording: return "Listening hands-free… press \(handsFree) to finish"
         case .transcribing: return "Transcribing…"
         case .idle:
             return micOK && pasteOK && engineOK

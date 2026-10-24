@@ -490,6 +490,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard AXIsProcessTrusted() else { return }
         keyTap = KeyTap()
         keyTap?.onKey = { [unowned self] in self.hotKey(id: $0, pressed: $1) }
+        keyTap?.onFnChord = { [unowned self] in self.cancelRecording() }
     }
 
     /// Id 1 = talk key, id 2 = hands-free key. Fn shortcuts go to the key tap, the rest to
@@ -526,18 +527,31 @@ final class App: NSObject, NSApplicationDelegate {
 
     /// Talk key: press starts, release finishes. Hands-free key: press starts, next press
     /// finishes. The hands-free key during a hold locks it hands-free (Fn, then Space while Fn
-    /// is down); the talk key during hands-free finishes. Both engines report here; neither
+    /// is down); the talk key is then ignored until it ends. Both engines report here; neither
     /// reports auto-repeats.
     func hotKey(id: UInt32, pressed: Bool) {
         switch (id, pressed, phase) {
         case (1, true, .idle): startDictation(mode: .hold)
-        case (1, true, .recording) where mode == .toggle: finishRecording()
         case (1, false, .recording) where mode == .hold: finishRecording()
         case (2, true, .idle): startDictation(mode: .toggle)
         case (2, true, .recording) where mode == .hold: lockHandsFree()
         case (2, true, .recording): finishRecording()
-        default: break  // transcribing, or release of a key that has no release action
+        default: break  // transcribing, the talk key during hands-free, other releases
         }
+    }
+
+    /// An Fn chord (Fn+Delete, Fn+←…) during a hold on the Fn talk key: the user meant the chord,
+    /// not dictation. Stops without a sound or a transcript; the chord itself goes through.
+    /// Hands-free (locked) recordings are left alone.
+    func cancelRecording() {
+        guard settings.talkKey.isFnOnly, phase == .recording, mode == .hold else { return }
+        timer?.invalidate()
+        timer = nil
+        recorder?.stop()
+        recorder = nil
+        phase = .idle
+        hud.hide()
+        appendToLog(["cancel": "fn chord"])
     }
 
     /// Releasing the talk key no longer finishes. The pill names it, then shows the meter again.

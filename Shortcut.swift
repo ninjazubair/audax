@@ -1,34 +1,46 @@
 // Shortcut: a key plus modifiers in Carbon codes (what RegisterEventHotKey takes), its menu-style
-// label, and the recorder button that sets one by pressing the keys.
+// label, and the recorder button that sets one by pressing the keys. Shortcuts with Fn go to the
+// event tap (KeyTap.swift) instead: Carbon hot keys have no Fn modifier.
 import Carbon.HIToolbox
 import SwiftUI
 
 struct Shortcut: Codable, Equatable {
     var keyCode: UInt32
-    var modifiers: UInt32  // Carbon modifier mask
+    var modifiers: UInt32  // Carbon modifier mask, plus fnMask for Fn
 
-    static let talkDefault = Shortcut(keyCode: UInt32(kVK_ANSI_D),
-                                      modifiers: UInt32(controlKey | optionKey))
-    static let handsFreeDefault = Shortcut(keyCode: UInt32(kVK_Space),
-                                           modifiers: UInt32(controlKey | optionKey))
+    /// Carbon's kEventKeyModifierFnMask value. Never passed to RegisterEventHotKey.
+    static let fnMask = UInt32(1 << 17)
+    static let talkDefault = Shortcut(keyCode: UInt32(kVK_Function), modifiers: fnMask)
+    static let handsFreeDefault = Shortcut(keyCode: UInt32(kVK_Space), modifiers: fnMask)
 
-    /// The pressed key as a shortcut; nil unless ⌃ or ⌥ is held. ⇧ or ⌘ alone does not count:
-    /// a registered hot key is swallowed system-wide, so ⇧D would eat every capital D, and a ⌘W
-    /// or ⌘Q pressed by accident while the recorder listens would stop working in every app.
-    static func from(_ event: NSEvent) -> Shortcut? {
+    var usesFn: Bool { modifiers & Shortcut.fnMask != 0 }
+    var isFnOnly: Bool { keyCode == UInt32(kVK_Function) }
+    var needsTap: Bool { usesFn }  // Carbon cannot see Fn: the event tap handles these
+
+    /// The pressed keys as a shortcut. A flagsChanged of the Fn key itself is Fn alone. A keyDown
+    /// needs ⌃, ⌥ or Fn: `fnHeld` comes from the recorder, which saw the Fn key go down (NSEvent
+    /// also flags arrows and F-keys as `.function`, so that flag cannot tell). ⇧ or ⌘ alone does
+    /// not count: a registered hot key is swallowed system-wide, so ⇧D would eat every capital D,
+    /// and a ⌘W or ⌘Q pressed by accident while the recorder listens would stop working everywhere.
+    static func from(_ event: NSEvent, fnHeld: Bool) -> Shortcut? {
+        if event.type == .flagsChanged {
+            return event.keyCode == UInt16(kVK_Function) ? talkDefault : nil
+        }
         let pairs: [(NSEvent.ModifierFlags, Int)] = [
             (.control, controlKey), (.option, optionKey), (.shift, shiftKey), (.command, cmdKey)]
-        let mods = pairs.filter { event.modifierFlags.contains($0.0) }.reduce(0) { $0 | $1.1 }
-        guard mods & (controlKey | optionKey) != 0 else { return nil }
-        return Shortcut(keyCode: UInt32(event.keyCode), modifiers: UInt32(mods))
+        let carbon = pairs.filter { event.modifierFlags.contains($0.0) }.reduce(0) { $0 | $1.1 }
+        let mods = UInt32(carbon) | (fnHeld ? fnMask : 0)
+        guard mods & (UInt32(controlKey | optionKey) | fnMask) != 0 else { return nil }
+        return Shortcut(keyCode: UInt32(event.keyCode), modifiers: mods)
     }
 
-    /// Menu-style label, e.g. "⌃⌥D" or "⌃⌥Space".
+    /// Menu-style label, e.g. "⌃⌥D", "Fn" or "Fn Space".
     var display: String {
+        if isFnOnly { return "Fn" }
         let marks = [(controlKey, "⌃"), (optionKey, "⌥"), (shiftKey, "⇧"), (cmdKey, "⌘")]
         let mods = marks.filter { modifiers & UInt32($0.0) != 0 }.map { $0.1 }.joined()
         let key = Shortcut.names[Int(keyCode)] ?? Shortcut.typed(keyCode) ?? "key \(keyCode)"
-        return mods + key
+        return (usesFn ? "Fn " : "") + mods + key
     }
 
     static let names: [Int: String] = [
@@ -63,14 +75,18 @@ struct Shortcut: Codable, Equatable {
 }
 
 /// A button showing the shortcut. Click it and press the new keys; Esc or a click elsewhere
-/// cancels. `onRecording` tells the app to pause its hot keys meanwhile: a registered hot key
-/// never reaches the window as a key press, so it could not be recorded (or rejected) otherwise.
+/// cancels. Fn pressed and released alone records "Fn"; a key pressed while Fn is down records
+/// Fn plus that key. `onRecording` tells the app to pause its hot keys and Fn tap meanwhile: a
+/// registered hot key never reaches the window as a key press, so it could not be recorded (or
+/// rejected) otherwise.
 struct ShortcutRecorder: View {
     @Binding var shortcut: Shortcut
     let conflictsWith: Shortcut?
     var onRecording: (Bool) -> Void = { _ in }
     @State private var monitor: Any?
     @State private var problem = ""
+    @State private var fnHeld = false  // the Fn key (keyCode 63) is down
+    @State private var fnWithKey = false  // a key was pressed during this Fn press
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 2) {
@@ -90,21 +106,39 @@ struct ShortcutRecorder: View {
     func start() {
         guard monitor == nil else { return }
         onRecording(true)
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { event in
-            if event.type == .leftMouseDown {
+        fnHeld = false
+        let events: NSEvent.EventTypeMask = [.keyDown, .flagsChanged, .leftMouseDown]
+        monitor = NSEvent.addLocalMonitorForEvents(matching: events) { event in
+            switch event.type {
+            case .leftMouseDown:
                 stop()
                 return event
+            case .flagsChanged:
+                fnChanged(event)
+                return event  // modifier changes always pass through
+            default:
+                fnWithKey = fnHeld
+                record(event)
+                return nil  // the keys belong to the recorder, not to whatever control has focus
             }
-            record(event)
-            return nil  // the keys belong to the recorder, not to whatever control has focus
         }
     }
 
+    /// Fn up with no key pressed since it went down records Fn alone.
+    func fnChanged(_ event: NSEvent) {
+        guard event.keyCode == UInt16(kVK_Function) else { return }
+        let down = event.modifierFlags.contains(.function)
+        let alone = fnHeld && !down && !fnWithKey
+        fnHeld = down
+        fnWithKey = false
+        if alone { record(event) }
+    }
+
     func record(_ event: NSEvent) {
-        let new = Shortcut.from(event)
+        let new = Shortcut.from(event, fnHeld: fnHeld)
         if new == nil, event.keyCode == UInt16(kVK_Escape) { return stop() }
         guard let new = new else {
-            problem = "Add ⌃ or ⌥"
+            problem = "Add ⌃, ⌥ or Fn"
             return
         }
         guard new != conflictsWith else {

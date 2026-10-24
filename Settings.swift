@@ -227,6 +227,12 @@ struct SettingsView: View {
                 ShortcutRecorder(shortcut: $settings.handsFreeKey, conflictsWith: settings.talkKey,
                                  onRecording: actions.pauseHotKeys)
             }
+            // Fixed height, shown or not (measured: two caption lines beside the button, 26):
+            // the window sizes to fit only once. A VStack, as an empty Group would collapse.
+            VStack(alignment: .leading) {
+                if model.globeConflict { GlobeHint(open: actions.openKeyboardSettings) }
+            }
+            .frame(height: 26, alignment: .topLeading)
             Toggle("Sounds", isOn: $settings.sounds)
             Picker("Language", selection: $settings.language) {
                 Text("English").tag("en")

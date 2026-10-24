@@ -16,14 +16,19 @@ final class Model: ObservableObject {
     @Published var pasteOK = false
     @Published var engineOK = false
     @Published var cleanupOK = false
+    @Published var tapOK = false  // the Fn key tap exists and is enabled
+    @Published var globeConflict = false  // App.globeKeyConflict
+    @Published var mode = RecordMode.toggle
     @Published var gitHub = GitHubSignIn.signedOut  // copilot only: the last gh probe's answer
     @Published var recent: [Recent] = []
     @Published var scratch = ""
 
-    /// `talk` and `handsFree` are the current shortcuts' labels, e.g. "⌃⌥D".
+    /// `talk` and `handsFree` are the current shortcuts' labels, e.g. "Fn" and "Fn Space".
     func statusLine(talk: String, handsFree: String) -> String {
         switch phase {
-        case .recording: return "Listening… release \(talk) or press \(handsFree) to finish"
+        case .recording where mode == .hold:
+            return "Listening… release \(talk) to finish, or press \(handsFree) to go hands-free"
+        case .recording: return "Listening hands-free… press \(talk) or \(handsFree) to finish"
         case .transcribing: return "Transcribing…"
         case .idle:
             return micOK && pasteOK && engineOK
@@ -43,6 +48,7 @@ struct Actions {
     let openLog: () -> Void
     let openSettings: () -> Void
     let pauseHotKeys: (Bool) -> Void  // true while a shortcut recorder listens
+    let openKeyboardSettings: () -> Void
 }
 
 struct CheckRow: View {
@@ -63,6 +69,22 @@ struct CheckRow: View {
             }
             Spacer()
             if !ok && !fixTitle.isEmpty { Button(fixTitle, action: fix) }
+        }
+    }
+}
+
+/// Shown while a Fn-only shortcut competes with macOS's own action for the Fn (Globe) key.
+struct GlobeHint: View {
+    let open: () -> Void
+
+    var body: some View {
+        HStack {
+            Text("macOS also uses the Fn key: set 'Press 🌐 key to' to Do Nothing")
+                .font(.caption)
+                .foregroundColor(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("Open Keyboard settings", action: open)
         }
     }
 }
@@ -151,7 +173,21 @@ struct MainView: View {
             CheckRow(ok: model.engineOK, title: "Speech engine and model",
                      detail: "whisper.cpp with the large-v3-turbo model, on this Mac's GPU.",
                      fixTitle: "Run setup…", fix: actions.runSetup)
+            if settings.talkKey.needsTap || settings.handsFreeKey.needsTap { shortcutsRow }
             cleanupRow
+        }
+    }
+
+    /// The Fn shortcuts run on the key tap, which needs Accessibility.
+    var shortcutsRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            CheckRow(ok: model.tapOK, title: "Shortcuts",
+                     detail: model.tapOK ? "Fn shortcuts active."
+                         : "Fn shortcuts need Accessibility.",
+                     fixTitle: "Allow…", fix: actions.allowPaste)
+            if model.globeConflict {
+                GlobeHint(open: actions.openKeyboardSettings).padding(.leading, 26)
+            }
         }
     }
 

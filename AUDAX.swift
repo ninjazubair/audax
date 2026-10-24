@@ -1,7 +1,7 @@
 // AUDAX: menu-bar dictation app. Owns two global shortcuts set in Settings (hold one to talk,
-// press the other for hands-free), records the mic with a live voice meter, hands the WAV to the
-// bundled dictate.py (local transcribe + clean-up), then pastes the text into the app the user
-// was typing in.
+// press the other for hands-free; Carbon hot keys, or the KeyTap for Fn ones), records the mic
+// with a live voice meter, hands the WAV to the bundled dictate.py (local transcribe + clean-up),
+// then pastes the text into the app the user was typing in.
 import AVFoundation
 import ApplicationServices
 import Carbon.HIToolbox
@@ -241,8 +241,9 @@ final class App: NSObject, NSApplicationDelegate {
     let script = Bundle.main.path(forResource: "dictate", ofType: "py") ?? ""
     let hud = HUD()
     let chime = Chime()
-    var hotKeys: [EventHotKeyRef?] = []  // [talk, hands-free]
+    var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
+    var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
     var usr1: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
     var timer: Timer?
@@ -260,14 +261,18 @@ final class App: NSObject, NSApplicationDelegate {
         startOllama: { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app")) },
         openLog: { [unowned self] in self.openLog() },
         openSettings: { [unowned self] in self.showSettings() },
-        pauseHotKeys: { [unowned self] in self.pauseHotKeys($0) })
+        pauseHotKeys: { [unowned self] in self.pauseHotKeys($0) },
+        openKeyboardSettings: {
+            let pane = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
+            if let url = URL(string: pane) { NSWorkspace.shared.open(url) }
+        })
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
     lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
     var checkTimer: Timer?
     var keepAliveTimer: Timer?  // keeps the local clean-up model loaded while AUDAX runs
     var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
-    var mode = RecordMode.toggle
+    var mode = RecordMode.toggle { didSet { model.mode = mode } }
     var elapsed = 0.0
     var peakDB: Float = -160  // loudest valid tick of the current recording
     var stoppedByCap = false  // maxSeconds ended it: nobody was there to stop it
@@ -276,10 +281,15 @@ final class App: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         buildMenu()
         installHotKeyHandler()
+        startKeyTap()
+        if keyTap == nil {
+            appendToLog(["warning": "key tap unavailable: Accessibility not granted"])
+        }
         registerHotKeys()
         settings.onShortcutsChanged = { [unowned self] in
             self.registerHotKeys()
             self.buildMenu()  // the dictation item shows the hands-free key
+            self.refreshChecks()  // the Fn check row and the Globe-key hint
         }
         // `pkill -USR1 AUDAX` acts like the hands-free key: lets scripts and tests drive the app.
         signal(SIGUSR1, SIG_IGN)
@@ -316,6 +326,12 @@ final class App: NSObject, NSApplicationDelegate {
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
         model.pasteOK = AXIsProcessTrusted()
         model.engineOK = !needsSetup()
+        if keyTap == nil, model.pasteOK {  // Accessibility granted since launch
+            startKeyTap()
+            if keyTap != nil { registerHotKeys() }  // hands it the Fn shortcuts
+        }
+        model.tapOK = keyTap?.isActive ?? false
+        model.globeConflict = globeKeyConflict
         switch settings.provider {
         case "ollama": checkOllama()
         case "copilot": checkGitHub()
@@ -341,6 +357,15 @@ final class App: NSObject, NSApplicationDelegate {
                 if self.settings.provider == "copilot" { self.model.cleanupOK = signedIn }
             }
         }
+    }
+
+    /// A Fn-only shortcut while macOS still runs its own action on an Fn (Globe) key press, i.e.
+    /// "Press 🌐 key to" is not "Do Nothing" (0). Absent means the system default: not 0.
+    /// Read only: AUDAX never writes that domain.
+    var globeKeyConflict: Bool {
+        guard settings.talkKey.isFnOnly || settings.handsFreeKey.isFnOnly else { return false }
+        let hiToolbox = UserDefaults(suiteName: "com.apple.HIToolbox")
+        return (hiToolbox?.object(forKey: "AppleFnUsageType") as? Int ?? -1) != 0
     }
 
     /// Ollama is running and has the configured model.
@@ -460,17 +485,29 @@ final class App: NSObject, NSApplicationDelegate {
         }, specs.count, specs, Unmanaged.passUnretained(self).toOpaque(), nil)
     }
 
-    /// Id 1 = talk key, id 2 = hands-free key. Drops the old registrations first, so it runs
-    /// again whenever the shortcuts change; registers nothing while paused.
+    /// Only when Accessibility is granted: without it creating a tap fails anyway.
+    func startKeyTap() {
+        guard AXIsProcessTrusted() else { return }
+        keyTap = KeyTap()
+        keyTap?.onKey = { [unowned self] in self.hotKey(id: $0, pressed: $1) }
+    }
+
+    /// Id 1 = talk key, id 2 = hands-free key. Fn shortcuts go to the key tap, the rest to
+    /// Carbon. Drops the old registrations first, so it runs again whenever the shortcuts
+    /// change; registers nothing while paused.
     func registerHotKeys() {
         hotKeys.compactMap { $0 }.forEach { UnregisterEventHotKey($0) }
         hotKeys = []
-        guard !hotKeysPaused else { return }
-        for (i, key) in [settings.talkKey, settings.handsFreeKey].enumerated() {
+        var keys: [(id: UInt32, shortcut: Shortcut)] = [(1, settings.talkKey),
+                                                        (2, settings.handsFreeKey)]
+        if hotKeysPaused { keys = [] }
+        keyTap?.update(keys.filter { $0.shortcut.needsTap })
+        for (i, key) in keys where !key.needsTap {
             var ref: EventHotKeyRef?
-            let id = EventHotKeyID(signature: 0x4155_4458, id: UInt32(i + 1))
+            let id = EventHotKeyID(signature: 0x4155_4458, id: i)
             let events = GetApplicationEventTarget()
-            let status = RegisterEventHotKey(key.keyCode, key.modifiers, id, events, 0, &ref)
+            let mods = key.modifiers & ~Shortcut.fnMask  // Carbon has no Fn modifier
+            let status = RegisterEventHotKey(key.keyCode, mods, id, events, 0, &ref)
             if status != noErr {
                 alert("\(key.display) is taken by another app (error \(status)). "
                       + "Pick another one in Settings.")
@@ -488,19 +525,40 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     /// Talk key: press starts, release finishes. Hands-free key: press starts, next press
-    /// finishes. Hot keys do not auto-repeat.
+    /// finishes. The hands-free key during a hold locks it hands-free (Fn, then Space while Fn
+    /// is down); the talk key during hands-free finishes. Both engines report here; neither
+    /// reports auto-repeats.
     func hotKey(id: UInt32, pressed: Bool) {
         switch (id, pressed, phase) {
         case (1, true, .idle): startDictation(mode: .hold)
+        case (1, true, .recording) where mode == .toggle: finishRecording()
         case (1, false, .recording) where mode == .hold: finishRecording()
         case (2, true, .idle): startDictation(mode: .toggle)
+        case (2, true, .recording) where mode == .hold: lockHandsFree()
         case (2, true, .recording): finishRecording()
-        default: break  // transcribing, repeats, or release of the other key
+        default: break  // transcribing, or release of a key that has no release action
         }
     }
 
-    /// The menu item, the window's button and SIGUSR1 act like the hands-free key.
-    @objc func toggle() { hotKey(id: 2, pressed: true) }
+    /// Releasing the talk key no longer finishes. The pill names it, then shows the meter again.
+    func lockHandsFree() {
+        mode = .toggle
+        hud.show("Hands-free")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self = self, self.phase == .recording else { return }
+            self.hud.show()
+        }
+    }
+
+    /// The menu item, the window's button and SIGUSR1: start hands-free, or finish whatever
+    /// recording runs (a hold too, so Stop always stops).
+    @objc func toggle() {
+        switch phase {
+        case .idle: startDictation(mode: .toggle)
+        case .recording: finishRecording()
+        case .transcribing: break
+        }
+    }
 
     func startDictation(mode: RecordMode) {
         if needsSetup() { return offerSetup() }

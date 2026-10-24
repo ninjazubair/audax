@@ -8,8 +8,14 @@ final class WhisperServer {
     let binary: String
     let model: String
     let port: Int
+    /// Random per launch. The server answers only under this path, so a web page in the user's
+    /// browser cannot reach /inference or /load on the fixed port (whisper-server sends
+    /// Access-Control-Allow-Origin: *). dictate.py gets it on stdin, never in argv or env.
+    let requestPath = "/audax-" + UUID().uuidString
+    private let pidPath = stateDir + "/whisper-server.pid"
     private var proc: Process?
     private var lastStart = Date.distantPast
+    private var retryGap: TimeInterval = 60  // never less: at most one start per minute
     private var stopping = false
     var isRunning: Bool { proc?.isRunning ?? false }
 
@@ -19,12 +25,24 @@ final class WhisperServer {
         self.port = port
     }
 
+    /// Starts the server when it is down, its binary and model exist (setup can add them while
+    /// AUDAX runs) and `retryGap` has passed since the last start. AUDAX calls this at launch
+    /// and every 5 s, so a restart is delayed, never dropped.
+    func keepAlive() {
+        let fm = FileManager.default
+        guard !isRunning, !stopping, Date().timeIntervalSince(lastStart) >= retryGap,
+              fm.isExecutableFile(atPath: binary), fm.fileExists(atPath: model) else { return }
+        start()
+    }
+
     /// Launches the server; its stdout and stderr are appended to stateDir/whisper-server.log.
     func start() {
         guard !isRunning else { return }
+        stopOrphan()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
-        p.arguments = ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-nt"]
+        p.arguments = ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-nt",
+                       "--request-path", requestPath]
         let fd = open(stateDir + "/whisper-server.log", O_WRONLY | O_CREAT | O_APPEND, 0o644)
         let log = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             : FileHandle.nullDevice
@@ -34,10 +52,11 @@ final class WhisperServer {
         p.terminationHandler = { [weak self] ended in
             DispatchQueue.main.async { self?.exited(ended) }
         }
+        lastStart = Date()  // a launch that fails counts too: keepAlive retries it a minute on
         guard (try? p.run()) != nil else { return }  // dictate.py uses whisper-cli
         proc = p
-        lastStart = Date()
         stopping = false
+        try? String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8)
         appendToLog(["info": "whisper-server started"])
     }
 
@@ -46,13 +65,29 @@ final class WhisperServer {
         proc?.terminate()
     }
 
-    /// An unexpected exit restarts the server, at most once per 60 s.
+    /// An unexpected exit logs a warning and restarts the server: at once if it ran a minute or
+    /// more. One that died sooner (a broken model) waits twice as long each time, up to an hour,
+    /// so a server that cannot run costs a log line an hour, not one a minute.
     private func exited(_ ended: Process) {
         guard ended === proc, !stopping else { return }
         appendToLog(["warning": "whisper-server exited: \(ended.terminationStatus)"])
-        // ponytail: an exit within 60 s of the last start is not retried (another process holds
-        // the port, a broken model), so a failing server never loops; whisper-cli covers it
-        // until AUDAX restarts. A timer that retries later is the upgrade if that is too strict.
-        if Date().timeIntervalSince(lastStart) >= 60 { start() }
+        let ranFor = Date().timeIntervalSince(lastStart)
+        retryGap = ranFor < 60 ? min(retryGap * 2, 3600) : 60
+        keepAlive()
+    }
+
+    /// A server left by an AUDAX that ended without quitting (a crash, SIGKILL) keeps its
+    /// 861 MB and the port. It is stopped only while the PID it left still runs a
+    /// whisper-server; by name, since a Homebrew upgrade moves the binary's real path.
+    private func stopOrphan() {
+        guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8),
+              let pid = pid_t(text), pid > 0 else { return }
+        var path = [UInt8](repeating: 0, count: 4 * Int(MAXPATHLEN))  // PROC_PIDPATHINFO_MAXSIZE
+        let length = Int(proc_pidpath(pid, &path, UInt32(path.count)))
+        let name = "/" + URL(fileURLWithPath: binary).lastPathComponent
+        guard length > 0, String(decoding: path.prefix(length), as: UTF8.self).hasSuffix(name)
+        else { return }
+        kill(pid, SIGTERM)
+        appendToLog(["warning": "stopped a whisper-server left running: \(pid)"])
     }
 }

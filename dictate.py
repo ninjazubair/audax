@@ -31,13 +31,15 @@ import providers
 WORD_SUBS_FILE = Path(__file__).with_name("word_subs.json")  # reloaded on every run
 OLLAMA_MODEL = "gemma4"
 DEFAULT_CONFIG = {"provider": "ollama", "model": OLLAMA_MODEL, "language": "en",
-                  "cleanup": "full", "api_key": ""}
+                  "cleanup": "full", "api_key": "", "whisper_path": ""}
 LANG_NAMES = {"en": "English", "de": "German"}
 FILLERS = {"en": "um, uh, you know, like", "de": "ähm, äh, also, halt, sozusagen"}
 
 # Absolute path: apps launch without Homebrew on PATH. install.command installs it.
 WHISPER_CLI = "/opt/homebrew/bin/whisper-cli"
-WHISPER_SERVER = "http://127.0.0.1:18777/inference"  # whisper-server, kept running by the app
+# whisper-server, kept running by the app. It answers only under a random path per app launch,
+# which the app passes on stdin as "whisper_path", so a web page cannot reach it.
+WHISPER_SERVER = "http://127.0.0.1:18777"
 STATE = Path.home() / ".cache/mac-dictation"
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 LOG = STATE / "dictation.log"
@@ -69,6 +71,8 @@ def read_config(stream) -> dict:
         cfg["language"] = "en"
     if cfg["cleanup"] not in ("off", "light", "full"):
         cfg["cleanup"] = "full"
+    if not isinstance(cfg["whisper_path"], str):
+        cfg["whisper_path"] = ""
     return cfg
 
 
@@ -153,7 +157,7 @@ def multipart(fields: dict, file_field: str, filename: str, data: bytes) -> tupl
     return "multipart/form-data; boundary=" + boundary, body
 
 
-def transcribe_server(wav: Path, vocab: list, language: str, url: str = WHISPER_SERVER,
+def transcribe_server(wav: Path, vocab: list, language: str, url: str,
                       timeout: float = 60) -> str:
     """The transcript from the app's resident whisper-server: no model load per call."""
     fields = {"temperature": "0", "response_format": "json", "language": language}
@@ -166,7 +170,7 @@ def transcribe_server(wav: Path, vocab: list, language: str, url: str = WHISPER_
         return parse_whisper(json.load(resp)["text"])
 
 
-def transcribe(wav: Path, vocab: list, language: str, server_url: str = WHISPER_SERVER) -> tuple:
+def transcribe(wav: Path, vocab: list, language: str, server_url: str) -> tuple:
     """(text, "server"|"cli"). whisper-cli whenever the server is not running, refuses, times
     out or replies without a "text" (OSError covers URLError, HTTPError and timeouts)."""
     try:
@@ -238,7 +242,8 @@ def cleanup(text: str, cfg: dict) -> tuple:
 def process(wav: Path, cfg: dict) -> dict:
     subs = load_subs()
     t0 = time.time()
-    text, stt = transcribe(wav, list(subs.values()), cfg["language"])
+    url = WHISPER_SERVER + cfg["whisper_path"] + "/inference"
+    text, stt = transcribe(wav, list(subs.values()), cfg["language"], url)
     raw = apply_subs(text, subs)
     t1 = time.time()
     final, status, error = cleanup(raw, cfg)

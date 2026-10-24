@@ -277,6 +277,7 @@ final class App: NSObject, NSApplicationDelegate {
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
     var usr1: DispatchSourceSignal?
+    var term: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
     var timer: Timer?
     var target: NSRunningApplication?  // the app that had focus when the shortcut was pressed
@@ -312,10 +313,7 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
-        let fm = FileManager.default
-        if fm.isExecutableFile(atPath: whisperServerBinary), fm.fileExists(atPath: modelPath) {
-            whisperServer.start()  // first, so the model loads while the rest starts up
-        }
+        whisperServer.keepAlive()  // first, so the model loads while the rest starts up
         buildMenu()
         installHotKeyHandler()
         startKeyTap()
@@ -333,9 +331,16 @@ final class App: NSObject, NSApplicationDelegate {
         usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         usr1?.setEventHandler { [weak self] in self?.toggle() }
         usr1?.resume()
+        // `pkill AUDAX` (build.sh --install) quits as the menu does, so applicationWillTerminate
+        // stops whisper-server instead of leaving it to launchd with 861 MB and the port.
+        signal(SIGTERM, SIG_IGN)
+        term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term?.setEventHandler { NSApp.terminate(nil) }
+        term?.resume()
         refreshIcon()
         checkTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.refreshChecks()
+            self?.whisperServer.keepAlive()  // restarts it, at most once a minute
         }
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 240,
                                               repeats: true) { [weak self] _ in
@@ -747,7 +752,7 @@ final class App: NSObject, NSApplicationDelegate {
         let key = Settings.keyProviders.contains(provider) ? Keychain.get(account: provider) : nil
         let config = ["provider": provider, "model": settings.models[provider] ?? "",
                       "language": settings.language, "cleanup": settings.cleanup,
-                      "api_key": key ?? ""]
+                      "api_key": key ?? "", "whisper_path": whisperServer.requestPath]
         return (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
     }
 

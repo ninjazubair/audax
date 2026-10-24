@@ -92,13 +92,17 @@ assert dictate.LOG.read_text().count("word_subs.json ignored: not an object") ==
 
 dictate.USER_SUBS.write_text('{"audacks": "AUDAX"}')
 real_transcribe = dictate.transcribe  # a model must not undo a correction
-dictate.transcribe = lambda wav, vocab, language: ("send the work front update", "server")
+urls = []
+dictate.transcribe = lambda wav, vocab, language, url: urls.append(url) or (
+    "send the work front update", "server")
 dictate.ask_model = lambda cfg, system, user: "<dictation>Send the work front update.</dictation>"
-result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
+result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full",
+                                         "whisper_path": "/audax-x"})
 assert result["final"] == "Send the Workfront update." and result["cleanup"] == "ok"
 assert result["stt"] == "server"  # which speech-to-text path ran, for the log
+assert urls == ["http://127.0.0.1:18777/audax-x/inference"]  # the app's per-launch path
 dictate.USER_SUBS.write_text('{"firefly": "Adobe Firefly"}')  # replacement holds its own key
-dictate.transcribe = lambda wav, vocab, language: ("open firefly now", "cli")
+dictate.transcribe = lambda wav, vocab, language, url: ("open firefly now", "cli")
 dictate.ask_model = lambda cfg, system, user: user  # echoes the <dictation> text unchanged
 result = dictate.process(Path("x.wav"), {**dictate.DEFAULT_CONFIG, "cleanup": "full"})
 assert result["final"] == "open Adobe Firefly now"  # applied once, never "Adobe Adobe Firefly"
@@ -107,6 +111,8 @@ dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
 assert dictate.read_config(None) == dictate.DEFAULT_CONFIG  # a broken stdin object: defaults
 cfg = dictate.read_config(io.StringIO('{"language": "fr", "cleanup": "on"}'))
 assert cfg["language"] == "en" and cfg["cleanup"] == "full"
+assert dictate.read_config(io.StringIO('{"whisper_path": 7}'))["whisper_path"] == ""
+assert dictate.read_config(io.StringIO('{"whisper_path": "/a"}'))["whisper_path"] == "/a"
 
 
 def boom_fn(provider, cfg, system, user, timeout=20):
@@ -149,7 +155,7 @@ assert got[:2] == ("um hello", "skipped") and "not signed in" in got[2], got
 dictate.providers.gh_token = real_gh
 
 SECRET = "sk-test-NEVER-LOG-ME"  # the key reaches neither the log nor the app's stdout
-dictate.transcribe = lambda wav, vocab, language: ("um so send the update", "cli")
+dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
 for key in (SECRET, SECRET + "\nx"):
     dictate.providers.post_json = reply_with(urllib.error.HTTPError(
         "https://api.anthropic.com/v1/messages", 401, "Unauthorized", {}, io.BytesIO(b"")))
@@ -161,7 +167,7 @@ for key in (SECRET, SECRET + "\nx"):
     assert printed["text"] == "um so send the update" and printed["cleanup"] == "skipped"
     assert "NEVER" not in out.getvalue() and "NEVER" not in dictate.LOG.read_text()
 assert "401" in dictate.LOG.read_text()
-dictate.transcribe = lambda wav, vocab, language: ("der Käse ist gut", "cli")  # unescaped
+dictate.transcribe = lambda wav, vocab, language, url: ("der Käse ist gut", "cli")  # unescaped
 sys.stdin = io.StringIO(json.dumps({"language": "de", "cleanup": "off"}))
 out = io.StringIO()
 with contextlib.redirect_stdout(out):

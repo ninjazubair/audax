@@ -78,7 +78,11 @@ codesign --sign "$IDENTITY" "$DMG"
 echo "Built: $DMG"
 
 if [ "${1:-}" = "--install" ]; then
+  # SIGTERM: AUDAX quits as from its menu and stops its whisper-server. Wait for that, so
+  # `open` below starts the new app instead of finding the old one still quitting.
   pkill -x AUDAX || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x AUDAX >/dev/null || break; sleep 0.3; done
+  pkill -9 -x AUDAX || true  # still there after 3 s; its next launch stops the orphaned server
   rm -rf /Applications/AUDAX.app  # the previous version stays reinstallable from its DMG
   cp -R "$APP" /Applications/
   "$LSREGISTER" -f /Applications/AUDAX.app  # refresh name and icon in Launchpad/Finder

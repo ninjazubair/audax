@@ -1,4 +1,5 @@
 """Run: /usr/bin/python3 test_providers.py"""
+import contextlib
 import io
 import json
 import tempfile
@@ -159,6 +160,65 @@ except RuntimeError:
 assert b == {"model": "gpt-4.1", "temperature": 0, "messages": [
     {"role": "system", "content": "S"}, {"role": "user", "content": "U"}]}
 
+# Copilot models: the seat's list picks the route; /responses gets its own body and reader.
+assert providers.MODELS_CACHE == Path.home() / ".cache/mac-dictation/copilot_models.json"
+assert providers.MODELS_CACHE_SECONDS == 600
+providers.MODELS_CACHE = Path(tempfile.mkdtemp()) / "models.json"  # never the real one
+mods = [{"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "route": "/responses"}, {"id": "gpt-4.1", "name": "GPT-4.1", "route": "/chat/completions"}]
+assert providers.copilot_route("gpt-6.1-sol", mods) == "/responses"
+assert providers.copilot_route("gpt-4.1", mods) == "/chat/completions"
+assert providers.copilot_route("unknown", mods) == "/chat/completions"   # test_copilot_route_unknown
+assert providers.copilot_route("gpt-6.1-sol", []) == "/chat/completions"  # no list: chat
+url, h, b = providers.copilot_request({"model": "gpt-6.1-sol", "_token": "t", "_host": "https://api.business.githubcopilot.com", "_models": mods}, "S", "U")
+assert url.endswith("/responses") and b == {"model": "gpt-6.1-sol", "instructions": "S", "input": [{"role": "user", "content": [{"type": "input_text", "text": "U"}]}], "store": False}
+assert h["Authorization"] == "Bearer t" and h["Copilot-Integration-Id"] == "audax"
+url, h, b = providers.copilot_request({"model": "gpt-4.1", "_token": "t", "_host": "https://x.githubcopilot.com", "_models": mods}, "S", "U")
+assert url.endswith("/chat/completions") and b["messages"][1] == {"role": "user", "content": "U"}
+assert providers.extract_text("copilot", {"output": [{"type": "message", "content": [{"type": "output_text", "text": "A"}, {"type": "output_text", "text": "B"}]}]}) == "AB"
+assert providers.extract_text("copilot", {"choices": [{"message": {"content": "C"}}]}) == "C"
+assert providers.extract_text("copilot", {"output": []}) == ""
+assert providers.extract_text("copilot", {"output": [  # reasoning items and refusals skipped
+    {"type": "reasoning", "summary": []},
+    {"type": "message", "content": [{"type": "refusal", "refusal": "no"},
+                                    {"type": "output_text", "text": "D"}]}]}) == "D"
+raw = {"data": [{"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "model_picker_enabled": True, "supported_endpoints": ["/responses", "ws:/responses"]}, {"id": "gpt-4.1", "model_picker_enabled": False, "supported_endpoints": []}, {"id": "emb", "model_picker_enabled": False, "supported_endpoints": ["/embeddings"]}, {"id": "ws-only", "model_picker_enabled": True, "supported_endpoints": ["ws:/responses"]}]}
+tmp = Path(tempfile.mkdtemp()) / "m.json"
+got = providers.copilot_models("t", "https://h.githubcopilot.com", get=lambda u, h, t: raw, cache=tmp)
+assert [m["id"] for m in got] == ["gpt-6.1-sol", "gpt-4.1"] and got[0]["route"] == "/responses" and got[1]["route"] == "/chat/completions"
+assert "t" not in json.loads(tmp.read_text()).get("token", "") and '"token"' not in tmp.read_text()
+assert got[1]["name"] == "gpt-4.1"  # no name: the id
+assert set(json.loads(tmp.read_text())) == {"at", "models"} and tmp.stat().st_mode & 0o777 == 0o600
+seen_get = []
+raw2 = {"data": [  # sorted: gpt-6.1-sol first, then by name, any case; no endpoints listed: chat
+    {"id": "b", "name": "beta", "model_picker_enabled": True},
+    {"id": "a", "name": "Alpha", "model_picker_enabled": True,
+     "supported_endpoints": ["/chat/completions", "/responses"]},
+    {"id": "gpt-6.1-sol", "name": "Zed", "model_picker_enabled": True,
+     "supported_endpoints": ["/responses"]}]}
+fresh = Path(tempfile.mkdtemp()) / "m.json"
+got = providers.copilot_models("t", "https://h.githubcopilot.com", cache=fresh,
+                               get=lambda u, h, t: seen_get.append((u, h, t)) or raw2)
+assert [(m["id"], m["route"]) for m in got] == [
+    ("gpt-6.1-sol", "/responses"), ("a", "/chat/completions"), ("b", "/chat/completions")]
+assert seen_get[0][0] == "https://h.githubcopilot.com/models"
+assert seen_get[0][1]["Authorization"] == "Bearer t" and seen_get[0][1]["Copilot-Integration-Id"]
+assert providers.copilot_models("t", "https://h.githubcopilot.com", cache=fresh,
+                                get=lambda u, h, t: seen_get.append(u) or raw) == got
+assert len(seen_get) == 1  # within 10 minutes: the cache, no call
+
+
+def down(url, headers, timeout):
+    raise urllib.error.URLError("offline")
+
+
+saved = json.loads(fresh.read_text())
+fresh.write_text(json.dumps({"at": 0, "models": saved["models"]}))  # stale
+assert providers.copilot_models("t", "https://h.githubcopilot.com", get=down, cache=fresh) == got
+for bad in (down, lambda u, h, t: {"nope": 1}, lambda u, h, t: {"data": [5]},
+            lambda u, h, t: (_ for _ in ()).throw(ValueError("not JSON"))):
+    assert providers.copilot_models("t", "https://h.githubcopilot.com", get=bad,
+                                    cache=Path(tempfile.mkdtemp()) / "m.json") == []  # never raises
+
 calls = []  # complete dispatches to the provider's builder and calls the module's post_json
 
 
@@ -191,6 +251,7 @@ except RuntimeError as e:
     assert "not signed in" in str(e) and "--git-protocol https" in str(e)
 providers.gh_token = lambda: "gho_t"
 providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
+providers.copilot_models = lambda token, host: []  # list unavailable: chat, as before
 sent = []
 providers.post_json = lambda url, headers, body, timeout: (
     sent.append((url, headers["Authorization"], timeout))
@@ -199,6 +260,28 @@ mine = {"model": "gpt-4.1"}
 assert providers.complete("copilot", mine, "S", "U") == "hi"
 assert sent == [("https://api.business.githubcopilot.com/chat/completions", "Bearer gho_t", 20)]
 assert mine == {"model": "gpt-4.1"}  # the caller's dict never gets the token
+
+providers.copilot_models = lambda token, host: mods  # gpt-6.1-sol listed on /responses
+sent = []
+providers.post_json = lambda url, headers, body, timeout: (
+    sent.append((url, body)) or {"output": [{"type": "message", "content": [
+        {"type": "output_text", "text": "clean"}]}]})
+assert providers.complete("copilot", {"model": "gpt-6.1-sol"}, "S", "U") == "clean"
+assert sent[0][0] == "https://api.business.githubcopilot.com/responses"
+assert sent[0][1]["instructions"] == "S" and "messages" not in sent[0][1]
+
+# CLI for the app: the list as a JSON array on stdout; signed out: exit 1, one stderr line.
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    assert providers.main(["--copilot-models"]) == 0
+    providers.gh_token = lambda: ""
+    assert providers.main(["--copilot-models"]) == 1
+    providers.gh_token = lambda: "gho_t"
+    providers.copilot_models = lambda token, host: []
+    assert providers.main(["--copilot-models"]) == 1
+assert json.loads(out.getvalue()) == mods and "gho" not in out.getvalue() + err.getvalue()
+assert "not signed in" in err.getvalue() and len(err.getvalue().splitlines()) == 2
+providers.copilot_models = lambda token, host: mods
 
 
 def http_error(code):

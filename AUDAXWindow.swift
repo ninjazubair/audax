@@ -49,6 +49,7 @@ struct Actions {
     let openSettings: () -> Void
     let pauseHotKeys: (Bool) -> Void  // true while a shortcut recorder listens
     let openKeyboardSettings: () -> Void
+    let fetchCopilotModels: (@escaping ([CopilotModel]) -> Void) -> Void  // App's; [] = failed
 }
 
 struct CheckRow: View {

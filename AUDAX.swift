@@ -50,6 +50,34 @@ func ghHasToken(_ gh: String) -> Bool {
     return proc.terminationStatus == 0 && !token.isEmpty
 }
 
+typealias CopilotModel = (id: String, name: String)
+
+/// `providers.py --copilot-models`: the Copilot seat's models, or [] on any failure or after
+/// 10 s. Python asks gh for the token itself; only ids and names reach Swift. Blocks: call it
+/// off the main thread.
+func copilotModels(script: String) -> [CopilotModel] {
+    let proc = Process(), out = Pipe(), done = DispatchSemaphore(value: 0)
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    proc.arguments = ["-B", "-X", "utf8", script, "--copilot-models"]
+    proc.standardInput = FileHandle.nullDevice
+    proc.standardOutput = out
+    proc.standardError = FileHandle.nullDevice
+    proc.terminationHandler = { _ in done.signal() }
+    guard (try? proc.run()) != nil else { return [] }
+    // ponytail: read after exit, so the list must fit the 64 KB pipe buffer (38 models ≈ 3 KB);
+    // a longer one times out to []. Read on a second thread if seats ever list hundreds.
+    guard done.wait(timeout: .now() + 10) == .success else {
+        proc.terminate()
+        return []
+    }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    let list = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
+    return list.compactMap { m in
+        guard let id = m["id"] as? String else { return nil }
+        return (id: id, name: m["name"] as? String ?? id)
+    }
+}
+
 /// Short generated chimes, independent of the alert-volume slider. The audio engine runs only
 /// while a chime plays, so the speakers are not held open (and idle sleep not blocked) all day.
 final class Chime {
@@ -265,7 +293,8 @@ final class App: NSObject, NSApplicationDelegate {
         openKeyboardSettings: {
             let pane = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
             if let url = URL(string: pane) { NSWorkspace.shared.open(url) }
-        })
+        },
+        fetchCopilotModels: { [unowned self] in self.fetchCopilotModels($0) })
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
     lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
     var checkTimer: Timer?
@@ -321,6 +350,15 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc func showSettings() { settingsWindow.show() }
+
+    /// For the Settings model picker: the list on a background queue, the completion on main.
+    func fetchCopilotModels(_ completion: @escaping ([CopilotModel]) -> Void) {
+        let script = Bundle.main.path(forResource: "providers", ofType: "py") ?? ""
+        DispatchQueue.global().async {
+            let models = copilotModels(script: script)
+            DispatchQueue.main.async { completion(models) }
+        }
+    }
 
     func refreshChecks() {
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized

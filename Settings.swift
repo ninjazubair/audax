@@ -89,7 +89,8 @@ final class Settings: ObservableObject {
     var onShortcutsChanged: (() -> Void)?
 
     static let defaultModels = [
-        "ollama": "gemma4", "copilot": "gpt-4.1", "claude": "claude-opus-5-5", "openai": "gpt-4.1"]
+        "ollama": "gemma4", "copilot": "gpt-6.1-sol", "claude": "claude-opus-5-5",
+        "openai": "gpt-4.1"]
     /// Picker order and labels.
     static let providers = [("ollama", "Local Ollama"), ("copilot", "GitHub Copilot"),
                             ("claude", "Claude API"), ("openai", "OpenAI API")]
@@ -110,9 +111,24 @@ final class Settings: ObservableObject {
         sounds = d.object(forKey: "sounds") as? Bool ?? true
         provider = d.string(forKey: "provider") ?? "ollama"
         let stored = d.dictionary(forKey: "models") as? [String: String] ?? [:]
-        models = Settings.defaultModels.merging(stored) { $1 }
+        models = Settings.migrateCopilotDefault(Settings.defaultModels.merging(stored) { $1 })
         wordSubs = Settings.readWordSubs() ?? []
         savedSubs = Settings.pairs(wordSubs)
+    }
+
+    /// Once per Mac: gpt-4.1 was the Copilot default until 0.2.1 and got stored with any model
+    /// edit, so it becomes the new default. The flag is set either way, so a later pick of
+    /// gpt-4.1 stays. Written here because didSet does not run in init.
+    static func migrateCopilotDefault(_ models: [String: String]) -> [String: String] {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: "copilotDefaultMigrated") else { return models }
+        var out = models
+        if out["copilot"] == "gpt-4.1" {
+            out["copilot"] = defaultModels["copilot"]
+            d.set(out, forKey: "models")
+        }
+        d.set(true, forKey: "copilotDefaultMigrated")
+        return out
     }
 
     /// [] when there is no file yet; nil when it exists but cannot be read or is not a JSON
@@ -204,6 +220,8 @@ struct SettingsView: View {
     @State private var right = ""
     @State private var key = ""  // typed API key; cleared once saved, never stored elsewhere
     @State private var keySaved = false
+    @State private var copilotModels: [CopilotModel] = []  // fetched once per Settings session
+    @State private var fetchingModels = false
 
     var body: some View {
         Form {
@@ -263,20 +281,52 @@ struct SettingsView: View {
             Picker("Provider", selection: $settings.provider) {
                 ForEach(Settings.providers, id: \.0) { tag, label in Text(label).tag(tag) }
             }
-            TextField("Model", text: Binding(get: { settings.models[settings.provider] ?? "" },
-                                             set: { settings.models[settings.provider] = $0 }))
+            if settings.provider == "copilot", !copilotModels.isEmpty {
+                Picker("Model", selection: modelName) {
+                    ForEach(copilotOptions, id: \.id) { Text($0.name).tag($0.id) }
+                }
+            } else {  // other providers, and Copilot while its list loads or if it failed
+                TextField("Model", text: modelName)
+            }
             providerExtras
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onAppear(perform: refreshKey)
+        .onAppear {
+            refreshKey()
+            fetchModels()
+        }
         .onChange(of: settings.provider) {
             key = ""  // a key typed for one provider is never saved under another
             refreshKey()
+            fetchModels()
         }
     }
 
-    /// Fixed height (measured: the key row plus its caption), so switching provider never
-    /// changes the box height: the window sizes to fit only once.
+    var modelName: Binding<String> {
+        Binding(get: { settings.models[settings.provider] ?? "" },
+                set: { settings.models[settings.provider] = $0 })
+    }
+
+    /// The seat's list, plus the saved id when the seat does not list it: kept, never replaced.
+    var copilotOptions: [CopilotModel] {
+        let saved = settings.models["copilot"] ?? ""
+        return copilotModels.contains { $0.id == saved }
+            ? copilotModels : copilotModels + [(id: saved, name: saved)]
+    }
+
+    /// Copilot only, once per Settings session; a failed fetch is retried on the next switch.
+    func fetchModels() {
+        guard settings.provider == "copilot", copilotModels.isEmpty, !fetchingModels else { return }
+        fetchingModels = true
+        actions.fetchCopilotModels { models in
+            copilotModels = models
+            fetchingModels = false
+        }
+    }
+
+    /// Fixed height, so switching provider (or the Copilot list arriving) never changes the box
+    /// height: the window sizes to fit only once. Measured: Copilot's two-line timing caption
+    /// plus the sign-in row, 56 (the key row plus its caption is 43).
     var providerExtras: some View {
         VStack(alignment: .leading, spacing: 6) {
             if Settings.keyProviders.contains(settings.provider) {
@@ -290,6 +340,8 @@ struct SettingsView: View {
                 }
                 .font(.caption)
             } else if settings.provider == "copilot" {
+                Text(Self.copilotTimings).font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Text(Self.gitHubCaptions[model.gitHub] ?? "")
                         .font(.caption).foregroundColor(.secondary)
@@ -299,8 +351,11 @@ struct SettingsView: View {
                 }
             }
         }
-        .frame(height: 43, alignment: .topLeading)
+        .frame(height: 56, alignment: .topLeading)
     }
+
+    static let copilotTimings = "Measured on this Mac: local gemma4 ≈0.3 s, gpt-4.1 ≈2 s, "
+        + "gpt-6.1-sol ≈4.6 s per dictation."
 
     static let gitHubCaptions: [GitHubSignIn: String] = [
         .signedIn: "Signed in to GitHub", .signedOut: "Not signed in",

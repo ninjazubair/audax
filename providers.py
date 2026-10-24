@@ -4,11 +4,16 @@ get_json only for the Copilot entitlement lookup).
 Python 3.9 standard library only: the app runs this under Apple's /usr/bin/python3, no pip.
 The API key comes in cfg["api_key"] (from the app's stdin) and goes only into a request header;
 it is never logged, and no error raised here quotes it. GitHub Copilot needs no key: its token
-is read from the GitHub CLI on every call and never stored; only the API host is cached.
+is read from the GitHub CLI on every call and never stored; only the API host and the seat's
+model list (ids, names, routes) are cached.
+
+CLI for the app's Settings: python3 providers.py --copilot-models prints that list as JSON.
 """
+import http.client
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -29,6 +34,9 @@ COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
 COPILOT_DEFAULT_API = "https://api.githubcopilot.com"
 HOST_CACHE = STATE / "copilot_host.json"  # {"api": str, "at": epoch}, never a token
 HOST_CACHE_SECONDS = 24 * 3600
+MODELS_CACHE = STATE / "copilot_models.json"  # {"at", "models": [{"id", "name", "route"}]}
+MODELS_CACHE_SECONDS = 600
+FIRST_MODEL = "gpt-6.1-sol"  # the default: top of the list
 
 
 def post_json(url: str, headers: dict, body: dict, timeout: float) -> dict:
@@ -122,9 +130,14 @@ def read_host_cache(cache: Path) -> Optional[str]:
 
 
 def write_host_cache(cache: Path, api: str, at: Optional[float] = None) -> None:
-    """Atomic, mode 0600 (mkstemp's), and the host only. at=0 marks it stale.
+    """The host only. at=0 marks it stale."""
+    write_cache(cache, {"api": api, "at": time.time() if at is None else at})
 
-    Best effort: a cache that cannot be written never fails a clean-up that has its host.
+
+def write_cache(cache: Path, data: dict) -> None:
+    """Atomic, mode 0600 (mkstemp's). Never pass it a token.
+
+    Best effort: a cache that cannot be written never fails a clean-up.
     On failure only the temp file this call created is removed.
     """
     tmp = None
@@ -132,7 +145,7 @@ def write_host_cache(cache: Path, api: str, at: Optional[float] = None) -> None:
         cache.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=cache.parent, prefix=cache.name + ".")
         with os.fdopen(fd, "w") as f:
-            json.dump({"api": api, "at": time.time() if at is None else at}, f)
+            json.dump(data, f)
         os.replace(tmp, cache)
     except OSError:
         if tmp:
@@ -161,22 +174,85 @@ def copilot_api_host(token: str, get=get_json, cache: Optional[Path] = None) -> 
     return api
 
 
+def model_route(entry: dict) -> Optional[str]:
+    """Chat when listed or when nothing is listed (gpt-4.1 lists none but works there)."""
+    endpoints = entry.get("supported_endpoints") or []
+    if "/chat/completions" in endpoints or not endpoints:
+        return "/chat/completions"
+    return "/responses" if "/responses" in endpoints else None  # e.g. ws: only, embeddings
+
+
+def read_models_cache(cache: Path) -> tuple:
+    """(fresh, models); (False, None) when there is none yet or it is not ours."""
+    try:
+        saved = json.loads(cache.read_text())
+        fresh = 0 <= time.time() - saved["at"] < MODELS_CACHE_SECONDS
+        models = saved["models"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, None
+    return (fresh, models) if isinstance(models, list) else (False, None)
+
+
+def copilot_models(token: str, host: str, get=get_json, cache: Optional[Path] = None) -> list:
+    """The seat's pickable models as {"id", "name", "route"}, gpt-6.1-sol first, cached 10 min.
+
+    Never raises: on any failure the last cached list, however old, else [].
+    cache defaults to MODELS_CACHE, looked up at call time (as copilot_api_host's).
+    """
+    cache = cache or MODELS_CACHE
+    fresh, saved = read_models_cache(cache)
+    if fresh:
+        return saved
+    try:
+        data = get(host + "/models", {"Authorization": "Bearer " + token, **COPILOT_HEADERS}, 10)
+        models = [{"id": m["id"], "name": m.get("name") or m["id"], "route": model_route(m)}
+                  for m in data["data"] if m.get("model_picker_enabled") or m["id"] == "gpt-4.1"]
+        models = sorted((m for m in models if m["route"]),
+                        key=lambda m: (m["id"] != FIRST_MODEL, m["name"].lower()))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError,
+            http.client.HTTPException):  # offline, HTTP status, not JSON, not the shape we know
+        return saved or []
+    write_cache(cache, {"at": time.time(), "models": models})
+    return models
+
+
+def copilot_route(model_id: str, models: list) -> str:
+    """The listed route; a model missing from the list (or no list) goes to chat."""
+    return next((m["route"] for m in models if m.get("id") == model_id), "/chat/completions")
+
+
 def copilot_request(cfg: dict, system: str, user: str) -> tuple:
+    if copilot_route(cfg.get("model", ""), cfg.get("_models", [])) == "/responses":
+        return responses_request(cfg, system, user)
     headers = json_headers(Authorization="Bearer " + cfg["_token"], **COPILOT_HEADERS)
     body = {"model": cfg.get("model", ""), "temperature": 0, "messages": chat(system, user)}
     return cfg["_host"] + "/chat/completions", headers, body
 
 
+def responses_request(cfg: dict, system: str, user: str) -> tuple:
+    """Copilot's /responses (the only endpoint of gpt-6.1-sol and the current OpenAI models)."""
+    headers = json_headers(Authorization="Bearer " + cfg["_token"], **COPILOT_HEADERS)
+    body = {"model": cfg.get("model", ""), "instructions": system,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": user}]}],
+            "store": False}
+    return cfg["_host"] + "/responses", headers, body
+
+
 def with_copilot_auth(cfg: dict) -> dict:
-    """A copy of cfg with the GitHub token and the plan's host; the caller's dict is untouched."""
+    """A copy of cfg with the GitHub token, the plan's host and the seat's models (for the
+    route; [] when unavailable); the caller's dict is untouched."""
     token = gh_token()
     if not token:
         raise RuntimeError("copilot: not signed in - run: "
                            "gh auth login --hostname github.com --web --git-protocol https")
-    return {**cfg, "_token": token, "_host": copilot_api_host(token)}
+    host = copilot_api_host(token)
+    return {**cfg, "_token": token, "_host": host, "_models": copilot_models(token, host)}
 
 
 def extract_text(provider: str, resp: dict) -> str:
+    if provider == "copilot" and "output" in resp:  # /responses
+        return "".join(c["text"] for item in resp["output"] if item.get("type") == "message"
+                       for c in item["content"] if c.get("type") == "output_text")
     if provider == "claude":
         return "".join(b["text"] for b in resp["content"] if b.get("type") == "text")
     if provider == "ollama":
@@ -200,3 +276,31 @@ def complete(provider: str, cfg: dict, system: str, user: str, timeout: float = 
             write_host_cache(HOST_CACHE, cfg["_host"], at=0)  # ask for the host next time
         raise
     return extract_text(provider, resp)
+
+
+def main(argv: list) -> int:
+    """--copilot-models: the seat's models as a JSON array on stdout, for the app's Settings.
+
+    Exit 1 with one line on stderr when not signed in or nothing is listed. The token is never
+    printed: errors are ours (RuntimeError) or reported by type only.
+    """
+    if argv != ["--copilot-models"]:
+        print("usage: providers.py --copilot-models", file=sys.stderr)
+        return 2
+    try:
+        models = with_copilot_auth({})["_models"]
+    except RuntimeError as e:  # not signed in, or Copilot Chat off: our own words
+        print(e, file=sys.stderr)
+        return 1
+    except Exception as e:  # the host lookup failed; its text is never printed
+        print("copilot: model list unavailable (%s)" % type(e).__name__, file=sys.stderr)
+        return 1
+    if not models:
+        print("copilot: no models listed for this account", file=sys.stderr)
+        return 1
+    print(json.dumps(models))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

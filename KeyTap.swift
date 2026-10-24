@@ -35,7 +35,9 @@ final class KeyTap {
 
     var isActive: Bool { port.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
 
-    /// The Fn shortcuts to match; [] matches nothing (while a Settings recorder listens).
+    /// Every registered shortcut; [] while a Settings recorder listens. Only the Fn ones
+    /// (`needsTap`) are matched here. The Carbon ones only keep their keys from counting as Fn
+    /// chords: they are never reported or swallowed by the tap.
     func update(_ shortcuts: [(id: UInt32, shortcut: Shortcut)]) {
         self.shortcuts = shortcuts
     }
@@ -69,30 +71,41 @@ final class KeyTap {
         if let id = shortcuts.first(where: { $0.shortcut.isFnOnly })?.id { report(id, down) }
     }
 
-    /// Fn+key. The release is matched by key alone, so letting go of Fn first still ends a hold.
-    /// Auto-repeats are swallowed without a report. An Fn+key that is no shortcut passes through
-    /// and is reported as a chord (its repeats are not).
+    /// Fn+key. A matched key stays swallowed until its release, which is matched by key alone:
+    /// letting go of Fn first still ends a hold, and the key's repeats are never typed.
     private func key(_ event: CGEvent, down: Bool) -> Bool {
         let code = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
-        if !down {
-            guard let id = held.removeValue(forKey: code) else { return false }
-            report(id, false)
+        if let id = held[code] {
+            if !down {
+                held[code] = nil
+                report(id, false)
+            }
             return true
         }
         // fnDown as well as the flag: macOS flags arrows and F-keys as Fn even without it.
-        guard fnDown, event.flags.contains(.maskSecondaryFn) else { return false }
-        let mods = KeyTap.carbon(event.flags) | Shortcut.fnMask
-        let pressed = Shortcut(keyCode: code, modifiers: mods)
+        guard down, fnDown, event.flags.contains(.maskSecondaryFn) else { return false }
+        return fnKeyDown(code, event)
+    }
+
+    /// A key going down while Fn is down. An Fn shortcut is reported and swallowed (repeats
+    /// unreported). A Carbon shortcut (e.g. ⌃⌥Space as hands-free while Fn talks) is left to
+    /// Carbon. Anything else is an Fn chord: reported once, and it keeps its macOS meaning.
+    private func fnKeyDown(_ code: UInt32, _ event: CGEvent) -> Bool {
+        let carbon = KeyTap.carbon(event.flags)
         let repeated = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-        guard let id = shortcuts.first(where: { $0.shortcut == pressed })?.id else {
-            if !repeated { DispatchQueue.main.async { [weak self] in self?.onFnChord?() } }
-            return false  // keeps its macOS meaning (forward delete, Home, F-key…)
+        let pressed = Shortcut(keyCode: code, modifiers: carbon | Shortcut.fnMask)
+        if let id = shortcuts.first(where: { $0.shortcut.needsTap && $0.shortcut == pressed })?.id {
+            if !repeated {
+                held[code] = id
+                report(id, true)
+            }
+            return true
         }
-        if !repeated {
-            held[code] = id
-            report(id, true)
+        let registered = shortcuts.contains {
+            $0.shortcut.keyCode == code && $0.shortcut.modifiers & ~Shortcut.fnMask == carbon
         }
-        return true
+        if !repeated, !registered { DispatchQueue.main.async { [weak self] in self?.onFnChord?() } }
+        return false  // Carbon's hot key, or macOS's meaning (forward delete, Home, F-key…)
     }
 
     private func report(_ id: UInt32, _ pressed: Bool) {

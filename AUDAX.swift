@@ -493,16 +493,16 @@ final class App: NSObject, NSApplicationDelegate {
         keyTap?.onFnChord = { [unowned self] in self.cancelRecording() }
     }
 
-    /// Id 1 = talk key, id 2 = hands-free key. Fn shortcuts go to the key tap, the rest to
-    /// Carbon. Drops the old registrations first, so it runs again whenever the shortcuts
-    /// change; registers nothing while paused.
+    /// Id 1 = talk key, id 2 = hands-free key. Fn shortcuts are matched by the key tap, the rest
+    /// registered with Carbon. Drops the old registrations first, so it runs again whenever the
+    /// shortcuts change; registers nothing while paused.
     func registerHotKeys() {
         hotKeys.compactMap { $0 }.forEach { UnregisterEventHotKey($0) }
         hotKeys = []
         var keys: [(id: UInt32, shortcut: Shortcut)] = [(1, settings.talkKey),
                                                         (2, settings.handsFreeKey)]
         if hotKeysPaused { keys = [] }
-        keyTap?.update(keys.filter { $0.shortcut.needsTap })
+        keyTap?.update(keys)  // matches only the Fn ones; the rest only exempt from Fn chords
         for (i, key) in keys where !key.needsTap {
             var ref: EventHotKeyRef?
             let id = EventHotKeyID(signature: 0x4155_4458, id: i)

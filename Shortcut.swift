@@ -136,7 +136,8 @@ struct ShortcutRecorder: View {
 
     func record(_ event: NSEvent) {
         let new = Shortcut.from(event, fnHeld: fnHeld)
-        if new == nil, event.keyCode == UInt16(kVK_Escape) { return stop() }
+        // Esc cancels, Fn held or not: "Fn ⎋" is never recorded. ⌃⎋ and ⌥⎋ still record.
+        if event.keyCode == UInt16(kVK_Escape), new?.usesFn ?? true { return stop() }
         guard let new = new else {
             problem = "Add ⌃, ⌥ or Fn"
             return

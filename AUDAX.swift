@@ -66,6 +66,11 @@ final class Chime {
     func play(_ notes: [Double], step: Double = 0.085, length: Double = 0.22) {
         guard let buf = render(notes, step: step, length: length) else { return }
         if !engine.isRunning { try? engine.start() }
+        // No sound rather than a crash: play() on an engine that failed to start raises an
+        // Objective-C exception ("player did not see an IO cycle", seen with audio output wedged).
+        // ponytail: a running engine whose device dies mid-play can still raise; catching that
+        // needs an Objective-C @try bridge, which this Swift-only build does not have.
+        guard engine.isRunning else { return }
         pending += 1
         player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async { self?.finished() }
@@ -217,6 +222,7 @@ struct VoiceMeter {
 func appendToLog(_ entry: [String: Any]) {
     var e = entry
     let stamp = DateFormatter()
+    stamp.locale = Locale(identifier: "en_US_POSIX")  // ASCII digits whatever the user's locale
     stamp.dateFormat = "yyyy-MM-dd HH:mm:ss"
     e["at"] = stamp.string(from: Date())
     guard let data = try? JSONSerialization.data(withJSONObject: e),
@@ -258,12 +264,13 @@ final class App: NSObject, NSApplicationDelegate {
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
     lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
     var checkTimer: Timer?
-    var keepAliveTimer: Timer?  // keeps the local clean-up model loaded between dictations
+    var keepAliveTimer: Timer?  // keeps the local clean-up model loaded while AUDAX runs
     var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
     var phase = Phase.idle { didSet { refreshIcon(); model.phase = phase } }
     var mode = RecordMode.toggle
     var elapsed = 0.0
     var peakDB: Float = -160  // loudest valid tick of the current recording
+    var stoppedByCap = false  // maxSeconds ended it: nobody was there to stop it
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
@@ -287,6 +294,7 @@ final class App: NSObject, NSApplicationDelegate {
                                               repeats: true) { [weak self] _ in
             self?.warmCleanupModel()  // gated inside: local Ollama with clean-up on
         }
+        warmCleanupModel()  // now, not 4 minutes from now
         showWindow()
     }
 
@@ -396,6 +404,7 @@ final class App: NSObject, NSApplicationDelegate {
             return appendToLog(["warning": "GitHub sign-in not started: \(why)"])
         }
         openInTerminal(URL(fileURLWithPath: script))
+        lastGitHubProbe = .distantPast  // the check row asks gh again on the next tick
     }
 
     func openInTerminal(_ script: URL) {
@@ -471,7 +480,9 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     /// A Settings recorder pauses the hot keys so it can see (and reject) the keys pressed.
+    /// A running recording finishes first: paused, a hold would never see its release.
     func pauseHotKeys(_ paused: Bool) {
+        if paused, phase == .recording { finishRecording() }
         hotKeysPaused = paused
         registerHotKeys()
     }
@@ -512,6 +523,7 @@ final class App: NSObject, NSApplicationDelegate {
         phase = .recording
         elapsed = 0
         peakDB = -160
+        stoppedByCap = false
         voice = VoiceMeter()
         warmCleanupModel()
         preReadModel()
@@ -550,7 +562,10 @@ final class App: NSObject, NSApplicationDelegate {
         if voice.ticks > 4, db > -90 { peakDB = max(peakDB, db) }  // VoiceMeter's warm-up skip
         elapsed += tick
         hud.meter(level, pulse: CGFloat(0.5 + 0.5 * cos(elapsed * 2 * .pi)))
-        if elapsed >= maxSeconds { finishRecording() }
+        if elapsed >= maxSeconds {
+            stoppedByCap = true
+            finishRecording()
+        }
     }
 
     func finishRecording() {
@@ -558,7 +573,10 @@ final class App: NSObject, NSApplicationDelegate {
         timer = nil
         recorder?.stop()
         recorder = nil
-        appendToLog(["peak_db": Double(peakDB.rounded()), "ms": Int((elapsed * 1000).rounded())])
+        var entry: [String: Any] = ["peak_db": Double(peakDB.rounded()),
+                                    "ms": Int((elapsed * 1000).rounded())]
+        if stoppedByCap { entry["cap"] = true }
+        appendToLog(entry)
         guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
             if settings.sounds { chime.nothing() }
@@ -573,7 +591,9 @@ final class App: NSObject, NSApplicationDelegate {
         let proc = Process()
         let out = Pipe(), err = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = ["-B", script, wavURL.path]  // -B: never a __pycache__ in the signed app
+        // -B: never a __pycache__ in the signed app. -X utf8: stdout and the log are UTF-8
+        // whatever LANG says (dictate.py writes German text unescaped).
+        proc.arguments = ["-B", "-X", "utf8", script, wavURL.path]
         // Settings go in on stdin, written before launch: the pipe buffers them, and a script
         // that exits early cannot leave a write to a closed pipe (SIGPIPE).
         let input = Pipe()
@@ -622,17 +642,24 @@ final class App: NSObject, NSApplicationDelegate {
             return hud.flash(nothing ? "Didn't catch that" : "Something went wrong: see log")
         }
         if settings.sounds { chime.done() }
-        // Before paste, so that paste's own "Allow AUDAX in Accessibility" flash wins.
-        if result?["cleanup"] as? String == "skipped" {
-            hud.flash("Pasted without clean-up", seconds: 2.5)
-        } else {
-            hud.hide()
+        deliver(text, skipped: result?["cleanup"] as? String == "skipped")
+    }
+
+    /// A recording ended by the 5-minute cap had nobody there to stop it, so whatever app is in
+    /// front now may not be where the text belongs: clipboard only.
+    func deliver(_ text: String, skipped: Bool) {
+        if stoppedByCap {
+            copyToClipboard(text)
+            return hud.flash("Copied: recording hit the 5-minute limit", seconds: 4)
         }
+        // Before paste, so that paste's own "Allow AUDAX in Accessibility" flash wins.
+        if skipped { hud.flash("Pasted without clean-up", seconds: 2.5) } else { hud.hide() }
         paste(text)
     }
 
-    /// Loads the clean-up model while the user speaks, and again every 4 minutes from
-    /// `keepAliveTimer`: Ollama otherwise unloads it when idle and the next clean-up takes ~4 s.
+    /// Keeps the clean-up model loaded while AUDAX runs: called at launch, when a recording
+    /// starts, and every 4 minutes from `keepAliveTimer`. Ollama otherwise unloads it (when idle,
+    /// or to load another model) and the next clean-up takes ~4 s.
     /// Local Ollama with clean-up on only: nothing is sent for another provider.
     func warmCleanupModel() {
         guard settings.provider == "ollama", settings.cleanup != "off",
@@ -658,9 +685,11 @@ final class App: NSObject, NSApplicationDelegate {
     /// Puts the text on the clipboard (it stays there, like Blip) and pastes it into the app the
     /// user started dictating in, bringing that app back to the front if they switched away.
     func paste(_ text: String) {
-        let board = NSPasteboard.general
-        board.clearContents()
-        board.setString(text, forType: .string)
+        copyToClipboard(text)
+        // Smoke runs set this, so a test can never paste into the app in front.
+        if ProcessInfo.processInfo.environment["AUDAX_NO_PASTE"] == "1" {
+            return appendToLog(["paste": "suppressed by AUDAX_NO_PASTE"])
+        }
         if targetIsSelf {
             model.scratch += (model.scratch.isEmpty ? "" : " ") + text
             return appendToLog(["paste_into": "AUDAX window"])
@@ -718,6 +747,9 @@ final class App: NSObject, NSApplicationDelegate {
     }
 }
 
-func bringToFront() {
-    if #available(macOS 14, *) { NSApp.activate() } else { NSApp.activate(ignoringOtherApps: true) }
+func bringToFront() { NSApp.activate() }  // macOS 14 API; build.sh's MIN_MACOS is 14.0
+
+func copyToClipboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
 }

@@ -7,7 +7,7 @@
 # kept: stray AUDAX.app copies would each show up in Launchpad and Spotlight.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.2.0"
+VERSION="0.2.1"
 # Explicit: swiftc's default deployment target follows the build Mac and came out as 28.0 on
 # macOS 27.0.1, which LaunchServices refuses to open. 14.0: the code uses macOS 14 APIs.
 MIN_MACOS="14.0"
@@ -16,6 +16,7 @@ BUNDLE_ID="local.audax"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="$DIR/dist/$STAMP"
 WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT  # this build's own temp folder only, also when a step fails
 APP="$WORK/AUDAX.app"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister
 
@@ -85,7 +86,7 @@ if [ "${1:-}" = "--install" ]; then
   echo "Installed and opened /Applications/AUDAX.app"
 fi
 
-# Temporary build copies: unregister so they never appear as extra apps, then remove.
+# Temporary build copies: unregister so they never appear as extra apps; the EXIT trap
+# removes them.
 "$LSREGISTER" -u "$APP" 2>/dev/null || true
 "$LSREGISTER" -u "$STAGE/AUDAX.app" 2>/dev/null || true
-rm -rf "$WORK"

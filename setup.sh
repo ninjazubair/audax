@@ -39,4 +39,5 @@ if [ "${SKIP_CLEANUP:-0}" != "1" ]; then
 fi
 
 echo
-echo "AUDAX is ready. Close this window and press Ctrl+Option+D in any text field."
+echo "AUDAX is ready. Close this window, then hold Ctrl+Option+D (⌃⌥D, the default) in any"
+echo "text field, speak, and let go."

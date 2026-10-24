@@ -54,9 +54,11 @@ assert dictate.accept("one two three four five six seven eight",  # model droppe
 assert dictate.accept("um uh so like you know I think", "I think.") == "I think."  # fillers
 assert dictate.accept("meet at five no wait actually five thirty",  # self-correction
                       "Meet at 5:30.") == "Meet at 5:30."
-assert dictate.accept("ähm also ich wollte halt fragen ob wir das meeting verschieben",
-                      "Ich wollte fragen, ob wir das Meeting verschieben.", "de"
-                      ) == "Ich wollte fragen, ob wir das Meeting verschieben."
+# 11 words, 6 of them content once the German fillers (ähm, also, halt, äh, sozusagen) are out:
+# 2 cleaned words is a third of 6, so German accepts; English counts all 11 and rejects.
+german = "ähm also ich halt äh wollte sozusagen fragen ob wir verschieben"
+assert dictate.accept(german, "Wir verschieben.", "de") == "Wir verschieben."
+assert dictate.accept(german, "Wir verschieben.", "en") == german
 
 real_ask_model = dictate.ask_model  # fake model answers, no network
 dictate.ask_model = lambda cfg, system, user: "<dictation>I think.</dictation>"
@@ -154,6 +156,13 @@ for key in (SECRET, SECRET + "\nx"):
     assert printed["text"] == "um so send the update" and printed["cleanup"] == "skipped"
     assert "NEVER" not in out.getvalue() and "NEVER" not in dictate.LOG.read_text()
 assert "401" in dictate.LOG.read_text()
+dictate.transcribe = lambda wav, vocab, language: "der Käse ist gut"  # stays unescaped
+sys.stdin = io.StringIO(json.dumps({"language": "de", "cleanup": "off"}))
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    assert dictate.main(["x.wav"]) == 0
+assert '"text": "der Käse ist gut"' in out.getvalue()
+assert '"raw": "der Käse ist gut"' in dictate.LOG.read_text(encoding="utf-8")
 dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
 
 sys.stdin = io.StringIO("")  # main reads its config from stdin; never the runner's

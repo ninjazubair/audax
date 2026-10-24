@@ -12,13 +12,14 @@ struct Shortcut: Codable, Equatable {
     static let handsFreeDefault = Shortcut(keyCode: UInt32(kVK_Space),
                                            modifiers: UInt32(controlKey | optionKey))
 
-    /// The pressed key as a shortcut; nil unless ⌃, ⌥ or ⌘ is held. ⇧ alone does not count:
-    /// a registered hot key is swallowed system-wide, so ⇧D would eat every capital D.
+    /// The pressed key as a shortcut; nil unless ⌃ or ⌥ is held. ⇧ or ⌘ alone does not count:
+    /// a registered hot key is swallowed system-wide, so ⇧D would eat every capital D, and a ⌘W
+    /// or ⌘Q pressed by accident while the recorder listens would stop working in every app.
     static func from(_ event: NSEvent) -> Shortcut? {
         let pairs: [(NSEvent.ModifierFlags, Int)] = [
             (.control, controlKey), (.option, optionKey), (.shift, shiftKey), (.command, cmdKey)]
         let mods = pairs.filter { event.modifierFlags.contains($0.0) }.reduce(0) { $0 | $1.1 }
-        guard mods & (controlKey | optionKey | cmdKey) != 0 else { return nil }
+        guard mods & (controlKey | optionKey) != 0 else { return nil }
         return Shortcut(keyCode: UInt32(event.keyCode), modifiers: UInt32(mods))
     }
 
@@ -40,20 +41,24 @@ struct Shortcut: Codable, Equatable {
     /// on a German layout). Nil when the layout has no printable character for it.
     static func typed(_ keyCode: UInt32) -> String? {
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData),
-              let bytes = CFDataGetBytePtr(Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue())
+              let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
         else { return nil }
-        let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
-        var deadKeys: UInt32 = 0
-        var chars = [UniChar](repeating: 0, count: 4)
-        var length = 0
-        let status = UCKeyTranslate(layout, UInt16(keyCode), UInt16(kUCKeyActionDisplay), 0,
-                                    UInt32(LMGetKbdType()),
-                                    OptionBits(kUCKeyTranslateNoDeadKeysMask),
-                                    &deadKeys, chars.count, &length, &chars)
-        let text = String(utf16CodeUnits: chars, count: length)
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.controlCharacters))
-        return status == noErr && !text.isEmpty ? text.uppercased() : nil
+        // The layout bytes belong to `source`: keep it alive until UCKeyTranslate is done.
+        return withExtendedLifetime(source) { () -> String? in
+            let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue()
+            guard let bytes = CFDataGetBytePtr(data) else { return nil }
+            let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+            var deadKeys: UInt32 = 0
+            var chars = [UniChar](repeating: 0, count: 4)
+            var length = 0
+            let status = UCKeyTranslate(layout, UInt16(keyCode), UInt16(kUCKeyActionDisplay), 0,
+                                        UInt32(LMGetKbdType()),
+                                        OptionBits(kUCKeyTranslateNoDeadKeysMask),
+                                        &deadKeys, chars.count, &length, &chars)
+            let junk = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+            let text = String(utf16CodeUnits: chars, count: length).trimmingCharacters(in: junk)
+            return status == noErr && !text.isEmpty ? text.uppercased() : nil
+        }
     }
 }
 
@@ -99,7 +104,7 @@ struct ShortcutRecorder: View {
         let new = Shortcut.from(event)
         if new == nil, event.keyCode == UInt16(kVK_Escape) { return stop() }
         guard let new = new else {
-            problem = "Add ⌃, ⌥ or ⌘"
+            problem = "Add ⌃ or ⌥"
             return
         }
         guard new != conflictsWith else {

@@ -133,7 +133,7 @@ def transcribe(wav: Path, vocab: list, language: str) -> str:
     cmd = [WHISPER_CLI, "-m", str(WHISPER_MODEL), "-f", str(wav), "-l", language, "-nt", "-np"]
     if vocab:
         cmd += ["--prompt", ", ".join(vocab)]  # biases spelling of product names
-    out = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=330)  # recording cap 300 s
     if out.returncode != 0:
         raise RuntimeError(f"whisper-cli failed: {out.stderr.strip()[-300:]}")
     return parse_whisper(out.stdout)
@@ -217,8 +217,9 @@ def process(wav: Path, cfg: dict) -> dict:
 
 def log(entry: dict) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
-    with LOG.open("a") as f:
-        f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M:%S"), **entry}) + "\n")
+    with LOG.open("a", encoding="utf-8") as f:  # the app reads the log as UTF-8
+        line = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), **entry}
+        f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
 def main(argv: list) -> int:
@@ -235,7 +236,7 @@ def main(argv: list) -> int:
     if not has_words(result["final"]):
         return 3
     print(json.dumps({"text": result["final"], "cleanup": result["cleanup"],
-                      "error": result["error"]}), end="")
+                      "error": result["error"]}, ensure_ascii=False), end="")
     return 0
 
 

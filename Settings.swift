@@ -27,7 +27,7 @@ enum Keychain {
         }
     }
 
-    /// Whether a key is stored, without reading (decrypting) it: for the 2-second check.
+    /// Whether a key is stored, without reading (decrypting) it: for the 5-second check.
     static func has(account: String) -> Bool {
         SecItemCopyMatching(query(account) as CFDictionary, nil) == errSecSuccess
     }
@@ -85,7 +85,7 @@ final class Settings: ObservableObject {
     @Published var wordSubs: [WordSub] {  // the user's own corrections, in userSubsPath
         didSet { saveWordSubs() }
     }
-    var wordSubsUnreadable = false  // the file exists but is not a JSON object
+    var savedSubs: [String: String] = [:]  // wordSubs as last read or written
     var onShortcutsChanged: (() -> Void)?
 
     static let defaultModels = [
@@ -111,17 +111,17 @@ final class Settings: ObservableObject {
         provider = d.string(forKey: "provider") ?? "ollama"
         let stored = d.dictionary(forKey: "models") as? [String: String] ?? [:]
         models = Settings.defaultModels.merging(stored) { $1 }
-        let subs = Settings.readWordSubs()
-        wordSubs = subs ?? []
-        wordSubsUnreadable = subs == nil
+        wordSubs = Settings.readWordSubs() ?? []
+        savedSubs = Settings.pairs(wordSubs)
     }
 
-    /// nil when the file exists but is not a JSON object; [] when there is no file yet.
+    /// [] when there is no file yet; nil when it exists but cannot be read or is not a JSON
+    /// object (saveWordSubs then moves it aside, never writes over it).
     static func readWordSubs() -> [WordSub]? {
-        guard let data = FileManager.default.contents(atPath: userSubsPath) else { return [] }
-        guard let pairs = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return nil
-        }
+        guard FileManager.default.fileExists(atPath: userSubsPath) else { return [] }
+        guard let data = FileManager.default.contents(atPath: userSubsPath),
+              let pairs = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
         return pairs.compactMap { wrong, right in
             guard let right = right as? String, !wrong.trimmingCharacters(in: .whitespaces).isEmpty
             else { return nil }
@@ -140,26 +140,42 @@ final class Settings: ObservableObject {
         }
     }
 
+    static func pairs(_ subs: [WordSub]) -> [String: String] {
+        Dictionary(subs.map { ($0.wrong, $0.right) }) { _, last in last }
+    }
+
     /// dictate.py re-reads the file on every dictation, so a change applies to the next one.
+    /// Re-reads it first, so a hand edit made while AUDAX runs is kept: the pairs here win, and
+    /// only those removed here since the last save leave the file.
     func saveWordSubs() {
-        if wordSubsUnreadable, FileManager.default.fileExists(atPath: userSubsPath) {
-            // The user's hand-edited file: move it aside, never write over it.
-            let stamp = DateFormatter()
-            stamp.dateFormat = "yyyyMMdd-HHmmss"
-            let aside = userSubsPath + ".unreadable-" + stamp.string(from: Date())
-            do {
-                try FileManager.default.moveItem(atPath: userSubsPath, toPath: aside)
-            } catch {
-                appendToLog(["warning": "word_subs.json left unchanged: could not move aside"])
-                return
-            }
+        let onDisk = Settings.readWordSubs()
+        if onDisk == nil, !Settings.moveAsideUnreadable() { return }  // never write over it
+        let mine = Settings.pairs(wordSubs)
+        let removed = Set(savedSubs.keys).subtracting(mine.keys)
+        let kept = Settings.pairs(onDisk ?? []).filter { !removed.contains($0.key) }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: kept.merging(mine) { $1 },
+                                                  options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: userSubsPath), options: .atomic)
+            savedSubs = mine
+        } catch {
+            appendToLog(["warning": "word_subs.json not saved: \(error.localizedDescription)"])
         }
-        wordSubsUnreadable = false
-        let pairs = Dictionary(wordSubs.map { ($0.wrong, $0.right) }) { _, last in last }
-        guard let data = try? JSONSerialization.data(withJSONObject: pairs,
-                                                     options: [.prettyPrinted, .sortedKeys])
-        else { return }
-        try? data.write(to: URL(fileURLWithPath: userSubsPath), options: .atomic)
+    }
+
+    /// The user's unreadable file, renamed with a time stamp; false (logged) if that fails.
+    static func moveAsideUnreadable() -> Bool {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.dateFormat = "yyyyMMdd-HHmmss"
+        let aside = userSubsPath + ".unreadable-" + stamp.string(from: Date())
+        do {
+            try FileManager.default.moveItem(atPath: userSubsPath, toPath: aside)
+            return true
+        } catch {
+            appendToLog(["warning": "word_subs.json left unchanged: could not move aside"])
+            return false
+        }
     }
 
     static func shortcut(_ data: Data?) -> Shortcut? {
@@ -262,7 +278,11 @@ struct SettingsView: View {
                     SecureField("API key", text: $key)
                     Button("Save", action: saveKey).disabled(Self.blank(key))
                 }
-                Text(keySaved ? "Key saved" : "No key").font(.caption).foregroundColor(.secondary)
+                HStack {  // link style at caption size: the row keeps the caption's height
+                    Text(keySaved ? "Key saved" : "No key").foregroundColor(.secondary)
+                    if keySaved { Button("Remove key", action: removeKey).buttonStyle(.link) }
+                }
+                .font(.caption)
             } else if settings.provider == "copilot" {
                 HStack {
                     Text(Self.gitHubCaptions[model.gitHub] ?? "")
@@ -293,6 +313,11 @@ struct SettingsView: View {
             appendToLog(["warning": "API key not saved: OSStatus \((error as NSError).code)"])
         }
         key = ""
+        refreshKey()
+    }
+
+    func removeKey() {
+        Keychain.delete(account: settings.provider)
         refreshKey()
     }
 

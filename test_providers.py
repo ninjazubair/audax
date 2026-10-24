@@ -188,7 +188,7 @@ try:
     providers.complete("copilot", {"model": "m"}, "S", "U")
     assert False
 except RuntimeError as e:
-    assert "not signed in" in str(e)
+    assert "not signed in" in str(e) and "--git-protocol https" in str(e)
 providers.gh_token = lambda: "gho_t"
 providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
 sent = []
@@ -208,7 +208,7 @@ def http_error(code):
 
 
 # A 401/403/404 from Copilot (e.g. gh switched account) marks the cached host stale; others don't.
-for code, at_after in ((403, 0), (401, 0), (404, 0), (500, None)):
+for code, stale in ((403, True), (401, True), (404, True), (500, False)):
     providers.write_host_cache(providers.HOST_CACHE, BIZ)
     providers.post_json = http_error(code)
     try:
@@ -217,6 +217,7 @@ for code, at_after in ((403, 0), (401, 0), (404, 0), (500, None)):
     except urllib.error.HTTPError as e:
         assert e.code == code
     saved = json.loads(providers.HOST_CACHE.read_text())
-    assert saved["api"] == BIZ and (saved["at"] == 0) == (at_after == 0), (code, saved)
+    assert saved["api"] == BIZ, (code, saved)
+    assert saved["at"] == 0 if stale else saved["at"] > 0, (code, saved)
 
 print("ok")

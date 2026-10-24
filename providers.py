@@ -172,7 +172,7 @@ def with_copilot_auth(cfg: dict) -> dict:
     token = gh_token()
     if not token:
         raise RuntimeError("copilot: not signed in - run: "
-                           "gh auth login --hostname github.com --web")
+                           "gh auth login --hostname github.com --web --git-protocol https")
     return {**cfg, "_token": token, "_host": copilot_api_host(token)}
 
 

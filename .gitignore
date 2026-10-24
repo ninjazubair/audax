@@ -3,3 +3,4 @@ dist/
 _backup-*/
 __pycache__/
 .superpowers/
+.claude/

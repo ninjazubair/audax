@@ -11,6 +11,7 @@ final class KeyTap {
     /// A key pressed with Fn down that is no shortcut (Fn+Delete, Fn+←…), on the main queue.
     var onFnChord: (() -> Void)?
     private var port: CFMachPort?
+    private var source: CFRunLoopSource?
     private var shortcuts: [(id: UInt32, shortcut: Shortcut)] = []
     private var fnDown = false
     private var held: [UInt32: UInt32] = [:]  // keyCode → id of a matched Fn+key still down
@@ -29,8 +30,17 @@ final class KeyTap {
         else { return nil }
         self.port = port
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
+        self.source = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
+    }
+
+    /// The callback holds an unretained `self`: no event may reach it after this.
+    deinit {
+        guard let port = port else { return }  // also runs when init returned nil
+        CGEvent.tapEnable(tap: port, enable: false)
+        if let source = source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        CFMachPortInvalidate(port)
     }
 
     var isActive: Bool { port.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
@@ -49,6 +59,7 @@ final class KeyTap {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
             if let port = port { CGEvent.tapEnable(tap: port, enable: true) }
+            resync()
             return false
         case .flagsChanged:
             fnChanged(event)
@@ -68,7 +79,23 @@ final class KeyTap {
         let down = event.flags.contains(.maskSecondaryFn)
         guard down != fnDown else { return }
         fnDown = down
-        if let id = shortcuts.first(where: { $0.shortcut.isFnOnly })?.id { report(id, down) }
+        if let id = fnOnlyID { report(id, down) }
+    }
+
+    /// The registered Fn-alone shortcut. A Carbon one with keyCode 63 is never the tap's.
+    private var fnOnlyID: UInt32? {
+        shortcuts.first(where: { $0.shortcut.needsTap && $0.shortcut.isFnOnly })?.id
+    }
+
+    /// While macOS had the tap disabled, releases went by unseen. Every held Fn+key ends, and Fn
+    /// is read from the system: a release missed meanwhile ends the Fn-alone shortcut too.
+    private func resync() {
+        held.values.forEach { report($0, false) }
+        held = [:]
+        let down = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
+        let released = fnDown && !down
+        fnDown = down
+        if released, let id = fnOnlyID { report(id, false) }
     }
 
     /// Fn+key. A matched key stays swallowed until its release, which is matched by key alone:

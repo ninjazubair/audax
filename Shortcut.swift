@@ -10,7 +10,8 @@ struct Shortcut: Codable, Equatable {
 
     /// Carbon's kEventKeyModifierFnMask value. Never passed to RegisterEventHotKey.
     static let fnMask = UInt32(1 << 17)
-    static let talkDefault = Shortcut(keyCode: UInt32(kVK_Function), modifiers: fnMask)
+    static let fnOnly = Shortcut(keyCode: UInt32(kVK_Function), modifiers: fnMask)  // Fn alone
+    static let talkDefault = fnOnly
     static let handsFreeDefault = Shortcut(keyCode: UInt32(kVK_Space), modifiers: fnMask)
 
     var usesFn: Bool { modifiers & Shortcut.fnMask != 0 }
@@ -24,7 +25,7 @@ struct Shortcut: Codable, Equatable {
     /// and a ⌘W or ⌘Q pressed by accident while the recorder listens would stop working everywhere.
     static func from(_ event: NSEvent, fnHeld: Bool) -> Shortcut? {
         if event.type == .flagsChanged {
-            return event.keyCode == UInt16(kVK_Function) ? talkDefault : nil
+            return event.keyCode == UInt16(kVK_Function) ? fnOnly : nil
         }
         let pairs: [(NSEvent.ModifierFlags, Int)] = [
             (.control, controlKey), (.option, optionKey), (.shift, shiftKey), (.command, cmdKey)]

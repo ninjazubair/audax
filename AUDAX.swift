@@ -96,11 +96,13 @@ final class Chime {
     func play(_ notes: [Double], step: Double = 0.085, length: Double = 0.22) {
         guard let buf = render(notes, step: step, length: length) else { return }
         if !engine.isRunning { try? engine.start() }
-        // No sound rather than a crash: play() on an engine that failed to start raises an
+        // No sound and a log line, not a crash: play() on an engine that failed to start raises an
         // Objective-C exception ("player did not see an IO cycle", seen with audio output wedged).
         // ponytail: a running engine whose device dies mid-play can still raise; catching that
         // needs an Objective-C @try bridge, which this Swift-only build does not have.
-        guard engine.isRunning else { return }
+        guard engine.isRunning else {
+            return appendToLog(["warning": "audio engine did not start"])
+        }
         pending += 1
         player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             DispatchQueue.main.async { self?.finished() }
@@ -129,13 +131,13 @@ final class Chime {
                 let t = Double(i) / rate
                 let envelope = min(1, t / 0.004) * exp(-t * 14)
                 let wave = sin(2 * .pi * freq * t) + 0.25 * sin(4 * .pi * freq * t)
-                out[start + i] += Float(0.28 * envelope * wave)
+                out[start + i] += Float(0.35 * envelope * wave)
             }
         }
         return buf
     }
 
-    func start() { play([880.0], length: 0.09) }  // one short soft tick
+    func start() { play([659.3, 987.8]) }  // rising E-B, 0.31 s: recording started
     func done() { play([784.0, 1046.5], step: 0.09, length: 0.2) }  // soft G-C: text pasted
     func nothing() { play([392.0, 293.7], step: 0.12, length: 0.25) }  // low, soft
 }
@@ -326,7 +328,8 @@ final class App: NSObject, NSApplicationDelegate {
             self.buildMenu()  // the dictation item shows the hands-free key
             self.refreshChecks()  // the Fn check row and the Globe-key hint
         }
-        // `pkill -USR1 AUDAX` acts like the hands-free key: lets scripts and tests drive the app.
+        // `pkill -USR1 AUDAX` runs toggle(), as the menu item does: starts hands-free when idle,
+        // finishes a recording. Lets scripts and tests drive the app.
         signal(SIGUSR1, SIG_IGN)
         usr1 = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         usr1?.setEventHandler { [weak self] in self?.toggle() }
@@ -506,7 +509,9 @@ final class App: NSObject, NSApplicationDelegate {
                                 keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
                                 keyEquivalent: ","))
-        let handsFree = settings.handsFreeKey.display  // the item acts like the hands-free key
+        // toggle(): starts hands-free when idle, finishes a recording. Shown with the hands-free
+        // key, which does the same except during a hold (there it locks hands-free).
+        let handsFree = settings.handsFreeKey.display
         menu.addItem(NSMenuItem(title: "Start / stop dictation   \(handsFree)",
                                 action: #selector(toggle), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open dictation log", action: #selector(openLog),
@@ -656,8 +661,9 @@ final class App: NSObject, NSApplicationDelegate {
         preReadModel()
         if settings.sounds { chime.start() }
         hud.show()
-        // Start the mic just after the 0.09 s tick so it is not recorded, and soon enough not
-        // to clip the first syllable of someone who talks the moment they press.
+        // Start the mic 0.1 s in: later clips the first syllable of someone who talks the moment
+        // they press. The 0.31 s start sound's fading tail is recorded; the meter's warm-up
+        // (to 0.35 s) keeps it out of the silence check.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self, self.phase == .recording else { return }
             self.startRecorder()

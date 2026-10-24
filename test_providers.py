@@ -1,7 +1,10 @@
 """Run: /usr/bin/python3 test_providers.py"""
 import contextlib
+import datetime
 import io
 import json
+import os
+import sys
 import tempfile
 import time
 import urllib.error
@@ -12,6 +15,10 @@ import providers
 
 UA = "AUDAX/0.3.0"
 assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/0.3.0"
+REAL_POST_JSON = providers.post_json  # the tests below replace it; the 0.4.0 wire test needs it
+assert providers.ENV_FILE == Path.home() / ".config/audax/.env"
+providers.ENV_FILE = Path(tempfile.mkdtemp()) / ".env"  # never the user's real .env
+ENVIRON = dict(os.environ)  # no secret ever goes into the environment
 
 
 def raising(exc):
@@ -330,7 +337,7 @@ with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
     providers.copilot_api_host = raising(OSError("bad gho_t"))  # the token in its text
     assert providers.main(["--copilot-models"]) == 1  # any other failure: its type name only
 assert out.getvalue() == ""
-assert err.getvalue().splitlines() == ["usage: providers.py --copilot-models"] * 2 + [
+assert err.getvalue().splitlines() == ["usage: providers.py --copilot-models | --test"] * 2 + [
     "copilot: model list unavailable (OSError)"]
 urllib.request.urlopen, providers.MODELS_CACHE = real_urlopen, prior_cache
 providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
@@ -357,4 +364,416 @@ for code, stale in ((403, True), (401, True), (404, True), (500, False)):
     assert saved["api"] == BIZ, (code, saved)
     assert saved["at"] == 0 if stale else saved["at"] > 0, (code, saved)
 
+# 0.4.0: Amazon Bedrock, Microsoft Foundry, OpenAI- and Anthropic-compatible gateways, and the
+# ~/.config/audax/.env file that overrides the app's settings.
+KEY = "sk-v4-NEVER-SHOW-1234"
+AK, SK = "AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"  # AWS's documented example
+CHAT = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "USR"}]
+NOW = datetime.datetime(2026, 10, 24, 12, 0, 0, tzinfo=datetime.timezone.utc)
+UTC = datetime.timezone.utc
+
+# load_env_file: KEY=VALUE, comments, blank lines, export, quotes, "=" inside values, no expansion.
+d = Path(tempfile.mkdtemp())
+(d / ".env").write_text(
+    "﻿# AUDAX settings\n\n   # indented comment\nAUDAX_PROVIDER=foundry\n"
+    "export AUDAX_MODEL = gpt-5-mini \nAZURE_OPENAI_API_KEY=\"abc=def\"\n"
+    "AUDAX_BASE_URL='https://x.example/v1'\nAWS_SECRET_ACCESS_KEY=a/b+c==\nNO_EQUALS\n=nokey\n"
+    "EMPTY=\nHALF=\"open\nAUDAX_API_VERSION=$HOME\r\nexport  SPACED=1\n", encoding="utf-8")
+assert providers.load_env_file(d / ".env") == {
+    "AUDAX_PROVIDER": "foundry", "AUDAX_MODEL": "gpt-5-mini", "AZURE_OPENAI_API_KEY": "abc=def",
+    "AUDAX_BASE_URL": "https://x.example/v1", "AWS_SECRET_ACCESS_KEY": "a/b+c==", "EMPTY": "",
+    "HALF": "\"open", "AUDAX_API_VERSION": "$HOME", "SPACED": "1"}
+assert providers.load_env_file(str(d / ".env"))["AUDAX_PROVIDER"] == "foundry"  # str or Path
+assert providers.load_env_file(d / "missing.env") == {}
+assert providers.load_env_file(d) == {}  # a directory
+(d / "latin1.env").write_bytes(b"AUDAX_API_KEY=caf\xe9\n")
+assert providers.load_env_file(d / "latin1.env") == {}  # not UTF-8: unreadable
+(d / "locked.env").write_text("AUDAX_PROVIDER=claude\n")
+os.chmod(d / "locked.env", 0)
+assert providers.load_env_file(d / "locked.env") == {}  # no permission
+os.chmod(d / "locked.env", 0o600)
+assert providers.load_env_file(None) == {}  # never raises
+
+# apply_env: generic keys, then the resulting provider's own keys; empty values never override.
+base = {"provider": "ollama", "model": "gemma4", "api_key": "", "region": "eu-west-1"}
+got = providers.apply_env(base, {
+    "AUDAX_PROVIDER": "bedrock", "AUDAX_MODEL": "", "AWS_DEFAULT_REGION": "us-west-2",
+    "AWS_REGION": "us-east-1", "AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_ACCESS_KEY_ID": "AK",
+    "AWS_SECRET_ACCESS_KEY": "SK", "AWS_PROFILE": "p", "AZURE_OPENAI_API_KEY": "az",
+    "OPENAI_API_KEY": "o", "ANTHROPIC_API_KEY": "a"})
+assert got == {"provider": "bedrock", "model": "gemma4", "api_key": "tok", "region": "us-east-1",
+               "aws_auth": "api_key"}, got  # bearer beats access keys and profile; AZURE_* ignored
+assert base == {"provider": "ollama", "model": "gemma4", "api_key": "", "region": "eu-west-1"}
+assert providers.apply_env({"provider": "bedrock", "aws_auth": "api_key"}, {
+    "AWS_ACCESS_KEY_ID": "AK", "AWS_SECRET_ACCESS_KEY": "SK", "AWS_SESSION_TOKEN": "ST",
+    "AWS_PROFILE": "p", "AWS_DEFAULT_REGION": "us-west-2", "AWS_BEARER_TOKEN_BEDROCK": ""}) == {
+    "provider": "bedrock", "aws_auth": "access_key", "aws_access_key_id": "AK",
+    "aws_secret_access_key": "SK", "aws_session_token": "ST", "region": "us-west-2"}
+assert providers.apply_env({"provider": "bedrock", "aws_auth": "access_key"}, {
+    "AWS_PROFILE": "work", "AWS_ACCESS_KEY_ID": ""}) == {
+    "provider": "bedrock", "aws_auth": "profile", "aws_profile": "work"}
+assert providers.apply_env({"provider": "bedrock"}, {
+    "AZURE_OPENAI_API_KEY": "az", "OPENAI_API_KEY": "o"}) == {"provider": "bedrock"}
+assert providers.apply_env({"provider": "openai", "api_key": "mine"}, {
+    "AUDAX_PROVIDER": "foundry", "AUDAX_API_KEY": "generic", "AZURE_OPENAI_API_KEY": "az",
+    "AZURE_OPENAI_ENDPOINT": "https://r.openai.azure.com", "AZURE_OPENAI_API_VERSION": "preview",
+    "OPENAI_API_KEY": "o", "AWS_REGION": "us-east-1"}) == {
+    "provider": "foundry", "api_key": "az", "base_url": "https://r.openai.azure.com",
+    "api_version": "preview"}  # the provider's own key is applied after the generic one
+assert providers.apply_env({"provider": "foundry"}, {"AUDAX_API_KEY": "generic"}) == {
+    "provider": "foundry", "api_key": "generic"}
+assert providers.apply_env({"provider": "openai"}, {
+    "OPENAI_API_KEY": "o", "OPENAI_BASE_URL": "https://gw/v1"}) == {"provider": "openai",
+                                                                     "api_key": "o"}
+assert providers.apply_env({}, {
+    "AUDAX_PROVIDER": "openai_compatible", "OPENAI_API_KEY": "o",
+    "OPENAI_BASE_URL": "https://gw/v1", "AUDAX_AUTH_HEADER": "x-api-key",
+    "AUDAX_API_VERSION": "v1"}) == {
+    "provider": "openai_compatible", "api_key": "o", "base_url": "https://gw/v1",
+    "auth_header": "x-api-key", "api_version": "v1"}
+assert providers.apply_env({"provider": "claude"}, {
+    "ANTHROPIC_API_KEY": "a", "ANTHROPIC_BASE_URL": "https://gw"}) == {"provider": "claude",
+                                                                        "api_key": "a"}
+assert providers.apply_env({"provider": "anthropic_compatible"}, {
+    "ANTHROPIC_API_KEY": "a", "ANTHROPIC_BASE_URL": "https://gw"}) == {
+    "provider": "anthropic_compatible", "api_key": "a", "base_url": "https://gw"}
+assert providers.apply_env({"provider": "ollama", "model": "m"}, {}) == {"provider": "ollama",
+                                                                        "model": "m"}
+for odd in (["x"], None, 5):  # a malformed provider: no override, and no exception
+    assert providers.apply_env({"provider": odd}, {"OPENAI_API_KEY": "o"}) == {"provider": odd}
+
+# auth_headers: three styles; empty or unknown gives the provider's default.
+assert providers.auth_headers("bearer", "k") == {"Authorization": "Bearer k"}
+assert providers.auth_headers("api-key", "k") == {"api-key": "k"}
+assert providers.auth_headers("x-api-key", "k") == {"x-api-key": "k"}
+assert providers.auth_headers(" X-API-KEY ", "k") == {"x-api-key": "k"}
+assert providers.auth_headers("", "k") == {"Authorization": "Bearer k"}
+assert providers.auth_headers("cookie", "k", "api-key") == {"api-key": "k"}
+
+# Builders: URL, headers and body, field by field.
+gw = {"model": "llama-3", "api_key": " k ", "base_url": "https://gw.example/v1/"}
+url, h, b = providers.openai_compatible_request(gw, "SYS", "USR")
+assert url == "https://gw.example/v1/chat/completions"
+assert h == {"content-type": "application/json", "User-Agent": UA, "Authorization": "Bearer k"}
+assert b == {"model": "llama-3", "messages": CHAT}  # no temperature: reasoning models refuse it
+url, h, b = providers.openai_compatible_request(
+    {**gw, "api_version": "2025-04-01-preview", "auth_header": "api-key"}, "SYS", "USR")
+assert url == "https://gw.example/v1/chat/completions?api-version=2025-04-01-preview"
+assert h["api-key"] == "k" and "Authorization" not in h
+fo = {"model": "gpt-5-mini", "api_key": "k", "base_url": "https://r.openai.azure.com/openai/v1"}
+url, h, b = providers.foundry_request(fo, "SYS", "USR")
+assert url == "https://r.openai.azure.com/openai/v1/chat/completions"
+assert h == {"content-type": "application/json", "User-Agent": UA, "api-key": "k"}
+assert b == {"model": "gpt-5-mini", "messages": CHAT}
+assert providers.foundry_request({**fo, "base_url": "https://r.openai.azure.com/"}, "S", "U")[
+    0] == "https://r.openai.azure.com/openai/v1/chat/completions"  # AZURE_OPENAI_ENDPOINT's root
+h = providers.foundry_request({**fo, "auth_header": "bearer"}, "S", "U")[1]
+assert h["Authorization"] == "Bearer k" and "api-key" not in h
+ac = {"model": "claude-sonnet-4-5", "api_key": "k",
+      "base_url": "https://r.services.ai.azure.com/anthropic"}
+url, h, b = providers.anthropic_compatible_request(ac, "SYS", "USR")
+assert url == "https://r.services.ai.azure.com/anthropic/v1/messages"
+assert h == {"content-type": "application/json", "User-Agent": UA, "x-api-key": "k",
+             "anthropic-version": "2023-06-01"}
+assert b == {"model": "claude-sonnet-4-5", "max_tokens": 2048, "system": "SYS",
+             "messages": [{"role": "user", "content": "USR"}]}  # no betas, no output_config
+url, h, _ = providers.anthropic_compatible_request({**ac, "auth_header": "bearer",
+                                                    "api_version": "2023-06-01"}, "S", "U")
+assert url.endswith("/anthropic/v1/messages?api-version=2023-06-01")
+assert h["Authorization"] == "Bearer k" and "x-api-key" not in h
+br = {"model": "anthropic.claude-test-v1:0", "region": "us-east-1", "api_key": "tok",
+      "aws_auth": "api_key"}
+url, h, b = providers.bedrock_request(br, "SYS", "USR")
+assert url == ("https://bedrock-runtime.us-east-1.amazonaws.com/model/"
+               "anthropic.claude-test-v1%3A0/converse")
+assert h == {"content-type": "application/json", "User-Agent": UA, "Authorization": "Bearer tok"}
+assert b == {"system": [{"text": "SYS"}],
+             "messages": [{"role": "user", "content": [{"text": "USR"}]}],
+             "inferenceConfig": {"maxTokens": 2048}}  # no temperature: Claude refuses sampling
+assert providers.bedrock_request({**br, "aws_auth": ""}, "S", "U")[1]["Authorization"] == (
+    "Bearer tok")  # no auth method chosen: the API key
+arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-test-v1:0"
+assert providers.bedrock_request({**br, "model": arn}, "S", "U")[0] == (
+    "https://bedrock-runtime.us-east-1.amazonaws.com/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A"
+    "123456789012%3Ainference-profile%2Fus.anthropic.claude-test-v1%3A0/converse")
+
+# Missing required fields: ValueError("<provider>: <field> is not set"); nothing else is sent.
+for build, cfg, field in [
+        (providers.openai_compatible_request, {"model": "m", "api_key": "k"}, "base_url"),
+        (providers.openai_compatible_request, {"base_url": "https://x", "api_key": "k"}, "model"),
+        (providers.openai_compatible_request, {"base_url": "https://x", "model": "m"}, "api_key"),
+        (providers.foundry_request, {"model": "m", "base_url": "https://x"}, "api_key"),
+        (providers.anthropic_compatible_request, {"model": "m", "base_url": "https://x"},
+         "api_key"),
+        (providers.bedrock_request, {"region": "us-east-1", "api_key": "k"}, "model"),
+        (providers.bedrock_request, {"model": "m", "api_key": "k"}, "region"),
+        (providers.bedrock_request, {"model": "m", "region": "us-east-1"}, "api_key"),
+        (providers.bedrock_request, {"model": "m", "region": "us-east-1", "aws_auth": "access_key",
+                                     "aws_access_key_id": AK}, "aws_secret_access_key"),
+        (providers.bedrock_request, {"model": "m", "region": "us-east-1", "aws_auth": "access_key",
+                                     "aws_secret_access_key": SK}, "aws_access_key_id")]:
+    name = build.__name__[:-len("_request")]
+    try:
+        build(cfg, "S", "U")
+        assert False, (name, field)
+    except ValueError as e:
+        assert str(e) == name + ": " + field + " is not set", (str(e), field)
+for build, cfg in [(providers.openai_compatible_request, {**gw, "base_url": "file:///etc/hosts"}),
+                   (providers.foundry_request, {**fo, "base_url": "r.openai.azure.com"}),
+                   (providers.bedrock_request, {**br, "region": "evil.example/x?"}),
+                   (providers.bedrock_request, {**br, "aws_auth": "sso"})]:
+    try:
+        build(cfg, "S", "U")
+        assert False, cfg
+    except ValueError as e:
+        assert "is not valid" in str(e) or "must start with" in str(e), e
+for build, cfg in [(providers.foundry_request, {**fo, "api_key": "sk-SECRET\nx"}),
+                   (providers.bedrock_request, {**br, "api_key": "SECRET—x"}),
+                   (providers.bedrock_request, {**br, "aws_auth": "access_key",
+                                                "aws_access_key_id": "AK", "aws_secret_access_key":
+                                                "SK", "aws_session_token": "SECRET\nx"})]:
+    try:  # http.client would quote a header value it cannot send: refused first, not quoted
+        build(cfg, "S", "U")
+        assert False
+    except ValueError as e:
+        assert "SECRET" not in repr(e), e
+
+# SigV4 against the AWS documentation example (IAM ListUsers, GET, empty body).
+doc = providers.sigv4_sign(
+    "GET", "https://iam.amazonaws.com/?Action=ListUsers&Version=2010-05-08", b"",
+    "application/x-www-form-urlencoded; charset=utf-8", "20150830T123600Z",
+    region="us-east-1", service="iam", access_key=AK, secret_key=SK)
+assert doc == {"Authorization": "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/"
+               "aws4_request, SignedHeaders=content-type;host;x-amz-date, Signature="
+               "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
+               "x-amz-date": "20150830T123600Z"}, doc
+assert providers.sigv4_sign(  # the canonical query string is sorted
+    "GET", "https://iam.amazonaws.com/?Version=2010-05-08&Action=ListUsers", b"",
+    "application/x-www-form-urlencoded; charset=utf-8", "20150830T123600Z",
+    region="us-east-1", service="iam", access_key=AK, secret_key=SK) == doc
+# Known answers from curl 8.7.1 --aws-sigv4 "aws:amz:us-east-1:bedrock" (24 Oct 2026, a local
+# recorder, no AWS): POST, JSON body, Host with a port, with and without a session token. The
+# path has no "%", so encoding it once (curl 8.7.1) or twice (AWS's rule for non-S3) agree.
+CURL_BODY = (b'{"system": [{"text": "S"}], "messages": [{"role": "user", "content": [{"text": '
+             b'"U"}]}], "inferenceConfig": {"maxTokens": 2048}}')
+for token, signature in (
+        ("", "6b561fd695a2e207a042d103c6834ac8112a6309228fb87dfebd0876c4c8f5b8"),
+        ("FQoGZXIvYXdzEXAMPLETOKEN",
+         "939264e030fdb895b22ce7c96d01620dcb4faffe477abb8a59cf8b3b87a9de32")):
+    got = providers.sigv4_sign(
+        "POST", "http://127.0.0.1:60905/model/anthropic.claude-test-v1/converse" if not token
+        else "http://127.0.0.1:60907/model/anthropic.claude-test-v1/converse", CURL_BODY,
+        "application/json", "20261024T071411Z", region="us-east-1", service="bedrock",
+        access_key=AK, secret_key=SK, session_token=token)
+    assert got["Authorization"].endswith("Signature=" + signature), (token, got)
+# A model id's ":" is %3A in the URL and %253A in the canonical request (the spec; curl 8.7.1
+# signs it once, so it disagrees here and only here; see the task-6 report).
+assert providers.canonical_uri("/model/anthropic.claude-test-v1%3A0/converse") == (
+    "/model/anthropic.claude-test-v1%253A0/converse")
+assert providers.canonical_uri("") == "/" and providers.canonical_uri("/") == "/"
+
+# Bedrock signed with an access key; sigv4_headers takes now as UTC (naive = UTC).
+sig = {**br, "api_key": "", "aws_auth": "access_key", "aws_access_key_id": AK,
+       "aws_secret_access_key": SK}
+url, h, b = providers.bedrock_request(sig, "S", "U", now=NOW)
+assert set(h) == {"content-type", "User-Agent", "Authorization", "x-amz-date"}, h
+assert h["x-amz-date"] == "20261024T120000Z" and h["content-type"] == "application/json"
+assert h["Authorization"].startswith(
+    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261024/us-east-1/bedrock/aws4_request, "
+    "SignedHeaders=content-type;host;x-amz-date, Signature=")
+assert h["Authorization"] == providers.sigv4_headers(
+    "POST", url, json.dumps(b).encode(), "us-east-1", "bedrock", access_key=AK, secret_key=SK,
+    now=NOW)["Authorization"]
+assert SK not in str(h)
+for when in (NOW.replace(tzinfo=None),
+             NOW.astimezone(datetime.timezone(datetime.timedelta(hours=2)))):
+    assert providers.bedrock_request(sig, "S", "U", now=when)[1] == h
+assert providers.bedrock_request(sig, "S", "V", now=NOW)[1]["Authorization"] != h[
+    "Authorization"]  # the body is signed
+url, h, b = providers.bedrock_request({**sig, "aws_session_token": "ST"}, "S", "U", now=NOW)
+assert h["x-amz-security-token"] == "ST"
+assert "SignedHeaders=content-type;host;x-amz-date;x-amz-security-token," in h["Authorization"]
+now_h = providers.bedrock_request(sig, "S", "U")[1]  # now=None: the clock, in UTC
+stamp = datetime.datetime.strptime(now_h["x-amz-date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
+assert abs((datetime.datetime.now(UTC) - stamp).total_seconds()) < 60
+
+# The bytes post_json sends are the bytes that were signed.
+captured = {}
+
+
+def capture(req, timeout):
+    captured.update(req=req, timeout=timeout)
+    return io.BytesIO(b'{"output": {"message": {"content": [{"text": "ok"}]}}}')
+
+
+urllib.request.urlopen = capture
+url, h, b = providers.bedrock_request({**sig, "aws_session_token": "ST"}, "S", "Grüße",
+                                      now=NOW)
+assert REAL_POST_JSON(url, h, b, 20) == {"output": {"message": {"content": [{"text": "ok"}]}}}
+req = captured["req"]
+assert req.full_url == url and req.host == "bedrock-runtime.us-east-1.amazonaws.com"
+assert req.get_header("Authorization") == h["Authorization"] == providers.sigv4_headers(
+    "POST", req.full_url, req.data, "us-east-1", "bedrock", access_key=AK, secret_key=SK,
+    session_token="ST", now=NOW)["Authorization"]
+assert req.get_header("Content-type") == "application/json"
+assert req.get_header("X-amz-date") == "20261024T120000Z"
+assert req.get_header("X-amz-security-token") == "ST"
+urllib.request.urlopen = real_urlopen
+
+# aws_profile_credentials: a temp HOME, never the real ~/.aws.
+home = Path(tempfile.mkdtemp())
+(home / ".aws").mkdir()
+(home / ".aws/credentials").write_text(
+    "[default]\naws_access_key_id = AKDEF\naws_secret_access_key = SKDEF\n\n"
+    "[work]\naws_access_key_id=AKW\naws_secret_access_key=SK%W\naws_session_token=STW\n")
+(home / ".aws/config").write_text(
+    "[default]\nregion = eu-central-1\n\n[profile work]\nregion = us-west-2\n"
+    "aws_access_key_id = AKCONFIG\n\n"  # the credentials file's key wins over this one
+    "[profile sso]\nsso_session = corp\nsso_account_id = 1\nregion = us-east-1\n\n"
+    "[profile legacy-sso]\nsso_start_url = https://x.awsapps.com/start\n\n"
+    "[profile cfgkeys]\naws_access_key_id = AKC\naws_secret_access_key = SKC\n"
+    "region = ap-south-1\n\n[profile role]\nrole_arn = arn:aws:iam::1:role/r\n"
+    "source_profile = default\n\n[sso-session corp]\nsso_region = us-east-1\n")
+assert providers.aws_profile_credentials("work", home=home) == ("AKW", "SK%W", "STW", "us-west-2")
+assert providers.aws_profile_credentials("default", home=home) == ("AKDEF", "SKDEF", "",
+                                                                   "eu-central-1")
+assert providers.aws_profile_credentials("", home=home)[0] == "AKDEF"  # no name: default
+assert providers.aws_profile_credentials("cfgkeys", home=home) == ("AKC", "SKC", "", "ap-south-1")
+for name, message in [
+        ("missing", "bedrock: AWS profile missing not found"),
+        ("sso", "bedrock: SSO profiles are not supported - use an access key or a Bedrock API key"),
+        ("legacy-sso",
+         "bedrock: SSO profiles are not supported - use an access key or a Bedrock API key"),
+        ("role", "bedrock: AWS profile role has no access key - use an access key or a Bedrock "
+                 "API key")]:
+    try:
+        providers.aws_profile_credentials(name, home=home)
+        assert False, name
+    except RuntimeError as e:
+        assert str(e) == message, e
+bare, broken = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+(broken / ".aws").mkdir()
+(broken / ".aws/credentials").write_text("aws_secret_access_key = SECRETLINE\n")  # no [section]
+for where, words in ((bare, "not found"), (broken, "cannot read")):
+    try:
+        providers.aws_profile_credentials("default", home=where)
+        assert False, where
+    except RuntimeError as e:
+        assert words in str(e) and "SECRETLINE" not in repr(e), e
+(broken / ".aws/credentials").write_bytes(b"[default]\naws_secret_access_key = SECRET\xff\n")
+try:  # not UTF-8: UnicodeDecodeError's repr would carry the file's bytes
+    providers.aws_profile_credentials("default", home=broken)
+    assert False
+except RuntimeError as e:
+    assert "SECRET" not in repr(e) and "cannot read" in str(e), e
+real_profile = providers.aws_profile_credentials  # bedrock_request reads the profile at call time
+aws_home = home  # the temp one, bound here so the stand-in can never fall back to ~/.aws
+providers.aws_profile_credentials = lambda name, **_: real_profile(name, home=aws_home)
+prof = {"model": "m", "aws_auth": "profile", "aws_profile": "work"}
+url, h, b = providers.bedrock_request(prof, "S", "U", now=NOW)
+assert url.startswith("https://bedrock-runtime.us-west-2.amazonaws.com/")  # the profile's region
+assert "Credential=AKW/20261024/us-west-2/bedrock/aws4_request" in h["Authorization"]
+assert h["x-amz-security-token"] == "STW"
+assert providers.bedrock_request({**prof, "region": "eu-west-1"}, "S", "U", now=NOW)[0].startswith(
+    "https://bedrock-runtime.eu-west-1.")  # a region in the settings wins
+assert "Credential=AKDEF/" in providers.bedrock_request({**prof, "aws_profile": ""}, "S", "U",
+                                                        now=NOW)[1]["Authorization"]
+try:
+    providers.bedrock_request({**prof, "aws_profile": "sso"}, "S", "U")
+    assert False
+except RuntimeError as e:
+    assert "SSO profiles are not supported" in str(e)
+providers.aws_profile_credentials = real_profile
+
+# extract_text: the three new reply shapes, including empty content.
+assert providers.extract_text("foundry", {"choices": [{"message": {"content": "F"}}]}) == "F"
+assert providers.extract_text("openai_compatible", {"choices": [{"message": {"content": ""}}]}
+                              ) == ""
+assert providers.extract_text("anthropic_compatible", {"content": [
+    {"type": "thinking", "thinking": "x"}, {"type": "text", "text": "A"},
+    {"type": "text", "text": "B"}]}) == "AB"
+assert providers.extract_text("anthropic_compatible", {"content": []}) == ""
+assert providers.extract_text("bedrock", {"output": {"message": {"role": "assistant", "content": [
+    {"reasoningContent": {"reasoningText": {"text": "hmm"}}}, {"text": "C"}, {"text": "D"}]}},
+    "stopReason": "end_turn"}) == "CD"
+assert providers.extract_text("bedrock", {"output": {"message": {"content": []}}}) == ""
+
+# complete dispatches the new ids, 20 s timeout; a missing field is raised before any request.
+sent = []
+
+
+def replying(reply):
+    def post(url, headers, body, timeout):
+        sent.append((url, headers, body, timeout))
+        return reply
+    return post
+
+
+OPENAI_REPLY = {"choices": [{"message": {"content": "hi"}}]}
+for provider, cfg, reply, want in [
+        ("openai_compatible", {"model": "m", "api_key": KEY, "base_url": "https://gw.example/v1"},
+         OPENAI_REPLY, "https://gw.example/v1/chat/completions"),
+        ("foundry", {**fo, "api_version": "preview"}, OPENAI_REPLY,
+         "https://r.openai.azure.com/openai/v1/chat/completions?api-version=preview"),
+        ("anthropic_compatible", ac, {"content": [{"type": "text", "text": "hi"}]},
+         "https://r.services.ai.azure.com/anthropic/v1/messages"),
+        ("bedrock", {**br, "model": "m:0"}, {"output": {"message": {"content": [{"text": "hi"}]}}},
+         "https://bedrock-runtime.us-east-1.amazonaws.com/model/m%3A0/converse")]:
+    providers.post_json = replying(reply)
+    assert providers.complete(provider, cfg, "S", "U") == "hi", provider
+    assert sent[-1][0] == want and sent[-1][3] == 20, sent[-1]
+providers.post_json = raising(AssertionError("sent without a required field"))
+for provider in ("bedrock", "foundry", "openai_compatible", "anthropic_compatible"):
+    try:
+        providers.complete(provider, {}, "S", "U")
+        assert False
+    except ValueError as e:
+        assert str(e).startswith(provider + ": ") and str(e).endswith(" is not set"), e
+
+# --test CLI for Settings' "Test connection": one JSON line, exit 0, never the key.
+
+
+def run_test_cli(stdin_text):
+    sys.stdin = io.StringIO(stdin_text)
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        assert providers.main(["--test"]) == 0
+    assert err.getvalue() == "" and len(out.getvalue().splitlines()) == 1, (out.getvalue(), err)
+    assert out.getvalue().endswith("\n") and KEY not in out.getvalue(), out.getvalue()
+    return json.loads(out.getvalue())
+
+
+GW = json.dumps({"provider": "openai_compatible", "model": "m", "api_key": KEY,
+                 "base_url": "https://gw.example/v1", "language": "en"})
+providers.post_json = replying({"choices": [{"message": {"content": "OK"}}]})
+got = run_test_cli(GW)
+assert set(got) == {"ok", "ms"} and got["ok"] is True and isinstance(got["ms"], int), got
+assert got["ms"] >= 0
+assert sent[-1][2]["messages"] == [{"role": "system", "content": "Reply with the single word OK."},
+                                   {"role": "user", "content": "OK?"}] and sent[-1][3] == 20
+providers.post_json = http_error(401)
+assert run_test_cli(GW) == {"ok": False, "error": "<HTTPError 401: 'x'>"}
+providers.post_json = raising(OSError("refused for " + KEY))  # an error that quotes the key
+got = run_test_cli(GW)
+assert got["ok"] is False and "<redacted>" in got["error"], got
+assert run_test_cli(json.dumps({"provider": "foundry"})) == {
+    "ok": False, "error": "ValueError('foundry: base_url is not set')"}
+for bad in ("not json", ""):
+    assert run_test_cli(bad)["ok"] is False, bad
+for bad in ("[1]", '[["provider", "openai_compatible"]]'):
+    assert run_test_cli(bad) == {"ok": False,
+                                 "error": "ValueError('settings are not a JSON object')"}, bad
+providers.ENV_FILE.write_text("AUDAX_PROVIDER=foundry\nAZURE_OPENAI_ENDPOINT=https://r.openai."
+                              "azure.com\nAZURE_OPENAI_API_KEY=" + KEY + "\nAUDAX_MODEL=gpt-5\n")
+providers.post_json = replying(OPENAI_REPLY)
+assert run_test_cli(json.dumps({"provider": "ollama", "model": "gemma4"}))["ok"] is True
+assert sent[-1][0] == "https://r.openai.azure.com/openai/v1/chat/completions"  # .env applied
+assert sent[-1][1]["api-key"] == KEY and sent[-1][2]["model"] == "gpt-5"
+providers.post_json = raising(OSError("refused for " + KEY))  # a key that came from the .env
+assert "<redacted>" in run_test_cli(json.dumps({"provider": "ollama"}))["error"]
+providers.ENV_FILE = Path(tempfile.mkdtemp()) / ".env"
+sys.stdin = sys.__stdin__
+assert dict(os.environ) == ENVIRON  # nothing above put a secret (or anything) in the environment
+
 print("ok")
+

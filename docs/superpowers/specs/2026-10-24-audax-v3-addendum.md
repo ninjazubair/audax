@@ -46,8 +46,8 @@ owner's Copilot Business seat; `/opt/homebrew/bin/whisper-server`)
   `output[].content[].text` where `output[].type == "message"` and `content[].type == "output_text"`.
 - Settings shows a Picker of the live list (fetched by Swift through `python3 providers.py
   --copilot-models`, printed as JSON) with the saved id kept if absent; caption with the measured
-  timings: "Measured on this Mac: local gemma4 ≈0.3 s, gpt-4.1 ≈2 s, gpt-6.1-sol ≈4.6 s per
-  dictation."
+  timings: "Measured on the developer's Mac: local gemma4 ≈0.3 s, gpt-4.1 ≈2 s, gpt-6.1-sol
+  ≈2.7–4.9 s per dictation."
 
 ### Start sound (owner: no beep heard)
 - Start = the v1 rising two-note (659.3 → 987.8 Hz, length 0.22) at amplitude 0.35; pasted and

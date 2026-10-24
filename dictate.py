@@ -174,18 +174,21 @@ def transcribe_server(wav: Path, vocab: list, language: str, url: str,
     req = urllib.request.Request(url, body, {"Content-Type": content_type})
     direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback: no proxy
     with direct.open(req, timeout=timeout) as resp:
-        return parse_whisper(json.load(resp)["text"])
+        reply = json.load(resp)
+    text = reply["text"] if isinstance(reply, dict) else None
+    if not isinstance(text, str):  # null, a number, a JSON list...
+        raise ValueError("whisper-server: no text")
+    return parse_whisper(text)
 
 
 def transcribe(wav: Path, vocab: list, language: str, server_url: str) -> tuple:
     """(text, "server"|"cli"). whisper-cli whenever the server is not running, refuses, times
     out, breaks off or replies without a usable "text" (OSError covers URLError, HTTPError and
-    timeouts; TypeError and AttributeError a null text or a JSON list; HTTPException a cut-off
-    reply such as IncompleteRead)."""
+    timeouts; ValueError a reply that is not JSON or has no text string; KeyError the server's
+    {"error"} reply; HTTPException a cut-off reply such as IncompleteRead)."""
     try:
         return transcribe_server(wav, vocab, language, url=server_url), "server"
-    except (OSError, ValueError, KeyError, TypeError, AttributeError,
-            http.client.HTTPException):
+    except (OSError, ValueError, KeyError, http.client.HTTPException):
         return transcribe_cli(wav, vocab, language), "cli"
 
 

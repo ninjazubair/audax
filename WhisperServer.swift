@@ -41,8 +41,8 @@ final class WhisperServer {
         stopOrphan()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
-        // -bs 5 -bo 5: beam search, as whisper-cli does, so both paths give the same text
-        // (measured 0.143-0.152 s per call against 0.121-0.124 s greedy).
+        // -bs 5 -bo 5: beam search, as whisper-cli does. Text identical to whisper-cli on the
+        // one test clip (Task 3, n=2: 0.143–0.152 s vs 0.121–0.124 s greedy).
         p.arguments = ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-nt",
                        "-bs", "5", "-bo", "5", "--request-path", requestPath]
         let fd = open(stateDir + "/whisper-server.log", O_WRONLY | O_CREAT | O_APPEND, 0o644)
@@ -54,10 +54,11 @@ final class WhisperServer {
         p.terminationHandler = { [weak self] ended in
             DispatchQueue.main.async { self?.exited(ended) }
         }
-        lastStart = Date()  // a launch that fails counts too: keepAlive retries it a minute on
+        lastStart = Date()  // a launch that fails counts too: keepAlive waits retryGap
         do {
             try p.run()
         } catch {  // dictate.py uses whisper-cli meanwhile
+            retryGap = min(retryGap * 2, 3600)  // backs off as an early exit does: one line each
             let why = error.localizedDescription
             return appendToLog(["warning": "whisper-server did not start: \(why)"])
         }

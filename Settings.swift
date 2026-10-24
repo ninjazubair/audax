@@ -302,7 +302,9 @@ struct SettingsView: View {
         }
         .onChange(of: model.gitHub) {  // signed in from this window: the fetch can now work
             guard model.gitHub == .signedIn else { return }
-            copilotModels = []  // perhaps as someone else, whose seat lists other models
+            // Perhaps as someone else, whose seat lists other models. The CLI's models cache is
+            // not keyed by account, so for up to 10 minutes after a switch the old list may show.
+            copilotModels = []
             fetchModels()  // Copilot only; for another provider, on the next switch
         }
     }
@@ -313,9 +315,10 @@ struct SettingsView: View {
     }
 
     /// The seat's list, plus the saved id when the seat does not list it: kept, never replaced.
+    /// No saved id (the field was cleared): no blank entry.
     var copilotOptions: [CopilotModel] {
         let saved = settings.models["copilot"] ?? ""
-        return copilotModels.contains { $0.id == saved }
+        return saved.isEmpty || copilotModels.contains { $0.id == saved }
             ? copilotModels : copilotModels + [(id: saved, name: saved)]
     }
 
@@ -359,8 +362,8 @@ struct SettingsView: View {
         .frame(height: 56, alignment: .topLeading)
     }
 
-    static let copilotTimings = "Measured on this Mac: local gemma4 ≈0.3 s, gpt-4.1 ≈2 s, "
-        + "gpt-6.1-sol ≈2.7–4.9 s per dictation."
+    static let copilotTimings = "Measured on the developer's Mac: local gemma4 ≈0.3 s, "
+        + "gpt-4.1 ≈2 s, gpt-6.1-sol ≈2.7–4.9 s per dictation."
 
     static let gitHubCaptions: [GitHubSignIn: String] = [
         .signedIn: "Signed in to GitHub", .signedOut: "Not signed in",

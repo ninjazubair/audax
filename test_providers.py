@@ -10,7 +10,16 @@ from pathlib import Path
 
 import providers
 
-UA = "AUDAX/0.2.0"
+UA = "AUDAX/0.3.0"
+assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/0.3.0"
+
+
+def raising(exc):
+    """A stand-in that raises exc, whatever it is called with."""
+    def fake(*args, **kwargs):
+        raise exc
+    return fake
+
 
 url, h, b = providers.claude_request({"model": "claude-opus-5-5", "api_key": "k"}, "SYS", "USR")
 assert url == "https://api.anthropic.com/v1/messages" and h["x-api-key"] == "k"
@@ -85,7 +94,7 @@ providers.HOST_CACHE = Path(tempfile.mkdtemp()) / "host.json"  # never the real 
 BIZ = "https://api.business.githubcopilot.com"
 assert providers.gh_token(run=lambda *a, **k: type(
     "R", (), {"stdout": " gho_x \n", "returncode": 0})()) == "gho_x"
-assert providers.gh_token(run=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())) == ""
+assert providers.gh_token(run=raising(FileNotFoundError())) == ""
 tmp = Path(tempfile.mkdtemp()) / "host.json"
 calls = []
 
@@ -223,9 +232,14 @@ saved = json.loads(fresh.read_text())
 fresh.write_text(json.dumps({"at": 0, "models": saved["models"]}))  # stale
 assert providers.copilot_models("t", "https://h.githubcopilot.com", get=down, cache=fresh) == got
 for bad in (down, lambda u, h, t: {"nope": 1}, lambda u, h, t: {"data": [5]},
-            lambda u, h, t: (_ for _ in ()).throw(ValueError("not JSON"))):
+            raising(ValueError("not JSON"))):
     assert providers.copilot_models("t", "https://h.githubcopilot.com", get=bad,
                                     cache=Path(tempfile.mkdtemp()) / "m.json") == []  # never raises
+partial = {"data": [{"name": "no id", "model_picker_enabled": True}, 5,
+                    {"id": "gpt-4.1", "supported_endpoints": []}]}
+assert [m["id"] for m in providers.copilot_models(  # a malformed entry: skipped, not the list
+    "t", "https://h.githubcopilot.com", get=lambda u, h, t: partial,
+    cache=Path(tempfile.mkdtemp()) / "m.json")] == ["gpt-4.1"]
 
 calls = []  # complete dispatches to the provider's builder and calls the module's post_json
 
@@ -292,6 +306,7 @@ assert sent[0][1]["instructions"] == "S" and "messages" not in sent[0][1]
 # the GET faked; the list as a JSON array on stdout; signed out: exit 1, one stderr line.
 providers.copilot_models = real_copilot_models  # the CLI is the one path that refreshes
 urllib.request.urlopen = no_fetch  # and still never reaches the network
+prior_cache = providers.MODELS_CACHE
 gets = []
 providers.get_json = lambda url, headers, timeout: (
     gets.append((url, headers["Authorization"], timeout)) or raw)
@@ -312,11 +327,12 @@ assert "not signed in" in err.getvalue() and len(err.getvalue().splitlines()) ==
 out, err = io.StringIO(), io.StringIO()
 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
     assert providers.main(["--models"]) == 2 and providers.main([]) == 2  # usage
-    providers.copilot_api_host = lambda token: (_ for _ in ()).throw(OSError("bad " + token))
+    providers.copilot_api_host = raising(OSError("bad gho_t"))  # the token in its text
     assert providers.main(["--copilot-models"]) == 1  # any other failure: its type name only
 assert out.getvalue() == ""
 assert err.getvalue().splitlines() == ["usage: providers.py --copilot-models"] * 2 + [
     "copilot: model list unavailable (OSError)"]
+urllib.request.urlopen, providers.MODELS_CACHE = real_urlopen, prior_cache
 providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
 providers.copilot_models = no_fetch
 providers.get_json = no_fetch

@@ -22,13 +22,13 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-USER_AGENT = "AUDAX/0.2.0"
+USER_AGENT = "AUDAX/0.3.0"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 STATE = Path.home() / ".cache/mac-dictation"
 GH_PATHS = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]  # an app's PATH has no Homebrew
-COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/0.2.0",
+COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/0.3.0",
                    "X-GitHub-Api-Version": "2025-04-01", "User-Agent": USER_AGENT}
 COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
 COPILOT_DEFAULT_API = "https://api.githubcopilot.com"
@@ -207,8 +207,10 @@ def copilot_models(token: str, host: str, get=None, cache: Optional[Path] = None
         return saved
     try:
         data = get(host + "/models", {"Authorization": "Bearer " + token, **COPILOT_HEADERS}, 10)
+        # An entry without an id is skipped, so one bad entry does not cost the whole list.
+        entries = [m for m in data["data"] if isinstance(m, dict) and m.get("id")]
         models = [{"id": m["id"], "name": m.get("name") or m["id"], "route": model_route(m)}
-                  for m in data["data"] if m.get("model_picker_enabled") or m["id"] == "gpt-4.1"]
+                  for m in entries if m.get("model_picker_enabled") or m["id"] == "gpt-4.1"]
         models = sorted((m for m in models if m["route"]),
                         key=lambda m: (m["id"] != FIRST_MODEL, m["name"].lower()))
     except (OSError, ValueError, KeyError, TypeError, AttributeError,

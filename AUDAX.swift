@@ -87,6 +87,7 @@ final class Chime {
     let player = AVAudioPlayerNode()
     let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
     var pending = 0
+    var warned = false  // the engine warning, logged once per dictation (beginRecording resets it)
 
     init() {
         engine.attach(player)
@@ -103,7 +104,9 @@ final class Chime {
         // ponytail: a running engine whose device dies mid-play can still raise; catching that
         // needs an Objective-C @try bridge, which this Swift-only build does not have.
         guard engine.isRunning else {
-            return appendToLog(["warning": "audio engine did not start"])
+            if !warned { appendToLog(["warning": "audio engine did not start"]) }
+            warned = true
+            return
         }
         pending += 1
         player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
@@ -140,7 +143,8 @@ final class Chime {
         return buf
     }
 
-    func start() { play([659.3, 987.8], amplitude: 0.35) }  // rising E-B, 0.31 s: recording
+    // Rising E-B, 0.31 s; recording starts at 0.1 s.
+    func start() { play([659.3, 987.8], amplitude: 0.35) }
     func done() { play([784.0, 1046.5], step: 0.09, length: 0.2) }  // soft G-C: text pasted
     func nothing() { play([392.0, 293.7], step: 0.12, length: 0.25) }  // low, soft
 }
@@ -281,6 +285,7 @@ final class App: NSObject, NSApplicationDelegate {
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
+    var axTrusted = AXIsProcessTrusted()  // Accessibility at the last check: a new grant renews
     var usr1: DispatchSourceSignal?
     var term: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
@@ -385,9 +390,15 @@ final class App: NSObject, NSApplicationDelegate {
 
     func refreshChecks() {
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        model.pasteOK = AXIsProcessTrusted()
+        let wasTrusted = axTrusted
+        axTrusted = AXIsProcessTrusted()
+        model.pasteOK = axTrusted
         model.engineOK = !needsSetup()
-        if keyTap == nil, model.pasteOK {  // Accessibility granted since launch
+        // Accessibility granted since the last check (a tap from before a revoke may still count
+        // as enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil
+        // first, so its deinit removes the old tap before the new one exists.
+        if axTrusted, !wasTrusted || keyTap?.isActive != true {
+            keyTap = nil
             startKeyTap()
             if keyTap != nil { registerHotKeys() }  // hands it the Fn shortcuts
         }
@@ -608,6 +619,9 @@ final class App: NSObject, NSApplicationDelegate {
     /// Hands-free (locked) recordings are left alone.
     func cancelRecording() {
         guard settings.talkKey.isFnOnly, phase == .recording, mode == .hold else { return }
+        // Cuts the start sound to a blip. stop() still runs the buffer's completion handler,
+        // once (checked), so Chime's pending count and engine stop stay right.
+        chime.player.stop()
         timer?.invalidate()
         timer = nil
         recorder?.stop()
@@ -662,12 +676,13 @@ final class App: NSObject, NSApplicationDelegate {
         voice = VoiceMeter()
         warmCleanupModel()
         preReadModel()
+        chime.warned = false
         if settings.sounds { chime.start() }
         hud.show()
         // Start the mic 0.1 s in: later clips the first syllable of someone who talks the moment
-        // they press. So the last ≈0.2 s of the 0.31 s start sound is recorded. The silence
-        // check counts readings from 0.25 s after the mic starts (0.35 s after the press);
-        // whether that warm-up skip keeps the tail out of it is unmeasured.
+        // they press. So the start sound's tail falls inside the recording window (≈0.2 s);
+        // whether the warm-up skip (the first 0.25 s of readings) keeps it out of the silence
+        // check is unmeasured.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self, self.phase == .recording else { return }
             self.startRecorder()
@@ -809,9 +824,11 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     /// Reads the whisper model while the user speaks, so whisper-cli finds it in memory instead
-    /// of on disk. Fire and forget.
+    /// of on disk. Fire and forget. Skipped while whisper-server runs: it holds the model, and
+    /// whisper-cli is only its fallback.
     func preReadModel() {
-        guard FileManager.default.fileExists(atPath: modelPath) else { return }
+        guard !whisperServer.isRunning, FileManager.default.fileExists(atPath: modelPath)
+        else { return }
         let cat = Process()
         cat.executableURL = URL(fileURLWithPath: "/bin/cat")
         cat.arguments = [modelPath]

@@ -225,6 +225,13 @@ assert dictate.transcribe(wav, [], "en", server_url=url) == ("fallback text", "c
 FakeWhisper.reply = b'{"text": null}'  # JSON, but no transcript in it
 assert dictate.transcribe(wav, [], "en", server_url=url)[1] == "cli"
 assert calls == ["cli", "cli", "cli", "cli"]
+for reply in (b'{"text": null}', b"[1]"):  # no usable transcript: ValueError, which falls back
+    FakeWhisper.reply = reply
+    try:
+        dictate.transcribe_server(wav, [], "en", url=url)
+        raise AssertionError("no error")
+    except ValueError:
+        pass
 dictate.transcribe_cli = real_cli
 fake.shutdown()
 mute = socket.socket()  # accepts the connection, never answers: a timeout is an OSError too

@@ -62,8 +62,8 @@ owner's Copilot Business seat; `/opt/homebrew/bin/whisper-server`)
   `prompt`) and falls back to `whisper-cli` when the server is not reachable. **Gate**: Task 10
   measures both paths on the same clip first; the server path ships only if it saves ≥ 0.15 s per
   dictation, otherwise the task records the numbers and stops.
-- The honest speed message to the owner: with Copilot `gpt-6.1-sol` a dictation takes ≈5 s of
-  which ≈4.6 s is the model; local gemma4 brings the whole thing to ≈1 s.
+- The honest speed message to the owner: with Copilot `gpt-6.1-sol` a dictation takes ≈3–5 s of
+  which 2.7–4.9 s is the model (measured); local gemma4 brings the whole thing to ≈1 s.
 
 ## Non-goals
 Suppressing macOS's Globe-key action; streaming transcription; a Windows build.

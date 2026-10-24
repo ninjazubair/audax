@@ -207,7 +207,7 @@ def copilot_models(token: str, host: str, get=None, cache: Optional[Path] = None
         return saved
     try:
         data = get(host + "/models", {"Authorization": "Bearer " + token, **COPILOT_HEADERS}, 10)
-        # An entry without an id is skipped, so one bad entry does not cost the whole list.
+        # Skipped: entries that are not a dict, and entries without an id (missing or empty).
         entries = [m for m in data["data"] if isinstance(m, dict) and m.get("id")]
         models = [{"id": m["id"], "name": m.get("name") or m["id"], "route": model_route(m)}
                   for m in entries if m.get("model_picker_enabled") or m["id"] == "gpt-4.1"]

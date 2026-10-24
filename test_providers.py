@@ -168,7 +168,13 @@ mods = [{"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "route": "/responses"}, {"i
 assert providers.copilot_route("gpt-6.1-sol", mods) == "/responses"
 assert providers.copilot_route("gpt-4.1", mods) == "/chat/completions"
 assert providers.copilot_route("unknown", mods) == "/chat/completions"   # test_copilot_route_unknown
-assert providers.copilot_route("gpt-6.1-sol", []) == "/chat/completions"  # no list: chat
+assert providers.copilot_route("gpt-6.2-sol", []) == "/responses"  # not listed: by its id
+assert providers.copilot_route("gpt-4.1", []) == "/chat/completions"
+assert providers.copilot_route("gpt-5.3-codex", []) == "/responses"
+assert providers.copilot_route("my-codex", []) == "/responses"
+assert providers.copilot_route("claude-opus-5.5", []) == "/chat/completions"
+assert providers.copilot_route("gpt-5-x", [{"id": "gpt-5-x", "route": "/chat/completions"}]
+                               ) == "/chat/completions"  # a listed route beats the guess
 url, h, b = providers.copilot_request({"model": "gpt-6.1-sol", "_token": "t", "_host": "https://api.business.githubcopilot.com", "_models": mods}, "S", "U")
 assert url.endswith("/responses") and b == {"model": "gpt-6.1-sol", "instructions": "S", "input": [{"role": "user", "content": [{"type": "input_text", "text": "U"}]}], "store": False}
 assert h["Authorization"] == "Bearer t" and h["Copilot-Integration-Id"] == "audax"
@@ -251,7 +257,15 @@ except RuntimeError as e:
     assert "not signed in" in str(e) and "--git-protocol https" in str(e)
 providers.gh_token = lambda: "gho_t"
 providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
-providers.copilot_models = lambda token, host: []  # list unavailable: chat, as before
+
+
+def no_fetch(*a, **k):  # a dictation never fetches the model list; only the CLI refreshes it
+    raise AssertionError("model list fetched on the dictation path")
+
+
+providers.copilot_models = no_fetch
+providers.get_json = no_fetch
+assert providers.with_copilot_auth({})["_models"] == []  # no cache: [], and no fetch
 sent = []
 providers.post_json = lambda url, headers, body, timeout: (
     sent.append((url, headers["Authorization"], timeout))
@@ -261,7 +275,8 @@ assert providers.complete("copilot", mine, "S", "U") == "hi"
 assert sent == [("https://api.business.githubcopilot.com/chat/completions", "Bearer gho_t", 20)]
 assert mine == {"model": "gpt-4.1"}  # the caller's dict never gets the token
 
-providers.copilot_models = lambda token, host: mods  # gpt-6.1-sol listed on /responses
+providers.write_cache(providers.MODELS_CACHE, {"at": 0, "models": mods})  # stale: used
+assert providers.with_copilot_auth({})["_models"] == mods
 sent = []
 providers.post_json = lambda url, headers, body, timeout: (
     sent.append((url, body)) or {"output": [{"type": "message", "content": [
@@ -272,6 +287,7 @@ assert sent[0][1]["instructions"] == "S" and "messages" not in sent[0][1]
 
 # CLI for the app: the list as a JSON array on stdout; signed out: exit 1, one stderr line.
 out, err = io.StringIO(), io.StringIO()
+providers.copilot_models = lambda token, host: mods  # the CLI is the one path that refreshes
 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
     assert providers.main(["--copilot-models"]) == 0
     providers.gh_token = lambda: ""

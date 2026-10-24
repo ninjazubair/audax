@@ -355,7 +355,7 @@ struct SettingsView: View {
     }
 
     static let copilotTimings = "Measured on this Mac: local gemma4 ≈0.3 s, gpt-4.1 ≈2 s, "
-        + "gpt-6.1-sol ≈4.6 s per dictation."
+        + "gpt-6.1-sol ≈2.7–4.9 s per dictation."
 
     static let gitHubCaptions: [GitHubSignIn: String] = [
         .signedIn: "Signed in to GitHub", .signedOut: "Not signed in",

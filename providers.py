@@ -195,6 +195,7 @@ def read_models_cache(cache: Path) -> tuple:
 
 def copilot_models(token: str, host: str, get=get_json, cache: Optional[Path] = None) -> list:
     """The seat's pickable models as {"id", "name", "route"}, gpt-6.1-sol first, cached 10 min.
+    For the CLI only: a dictation reads the cache and never calls this.
 
     Never raises: on any failure the last cached list, however old, else [].
     cache defaults to MODELS_CACHE, looked up at call time (as copilot_api_host's).
@@ -217,8 +218,14 @@ def copilot_models(token: str, host: str, get=get_json, cache: Optional[Path] = 
 
 
 def copilot_route(model_id: str, models: list) -> str:
-    """The listed route; a model missing from the list (or no list) goes to chat."""
-    return next((m["route"] for m in models if m.get("id") == model_id), "/chat/completions")
+    """The listed route; for a model the list lacks (or no list), a guess from its id."""
+    listed = next((m["route"] for m in models if m.get("id") == model_id), None)
+    if listed:
+        return listed
+    # ponytail: id heuristic for the families measured on /responses only (24 Oct 2026); a new
+    # /responses-only family (say gpt-7) goes to chat until it shows up in the cached list.
+    responses = model_id.startswith(("gpt-5", "gpt-6")) or "codex" in model_id
+    return "/responses" if responses else "/chat/completions"
 
 
 def copilot_request(cfg: dict, system: str, user: str) -> tuple:
@@ -239,14 +246,16 @@ def responses_request(cfg: dict, system: str, user: str) -> tuple:
 
 
 def with_copilot_auth(cfg: dict) -> dict:
-    """A copy of cfg with the GitHub token, the plan's host and the seat's models (for the
-    route; [] when unavailable); the caller's dict is untouched."""
+    """A copy of cfg with the GitHub token, the plan's host and the cached model list (for the
+    route), at any age; [] without one. Never fetches the list: a dictation must not wait for
+    it; the CLI (run by the app's Settings) refreshes it. The caller's dict is untouched."""
     token = gh_token()
     if not token:
         raise RuntimeError("copilot: not signed in - run: "
                            "gh auth login --hostname github.com --web --git-protocol https")
     host = copilot_api_host(token)
-    return {**cfg, "_token": token, "_host": host, "_models": copilot_models(token, host)}
+    models = read_models_cache(MODELS_CACHE)[1] or []
+    return {**cfg, "_token": token, "_host": host, "_models": models}
 
 
 def extract_text(provider: str, resp: dict) -> str:
@@ -279,7 +288,8 @@ def complete(provider: str, cfg: dict, system: str, user: str, timeout: float = 
 
 
 def main(argv: list) -> int:
-    """--copilot-models: the seat's models as a JSON array on stdout, for the app's Settings.
+    """--copilot-models: the seat's models as a JSON array on stdout, for the app's Settings;
+    the only path that refreshes the cached list (when older than 10 minutes).
 
     Exit 1 with one line on stderr when not signed in or nothing is listed. The token is never
     printed: errors are ours (RuntimeError) or reported by type only.
@@ -288,7 +298,8 @@ def main(argv: list) -> int:
         print("usage: providers.py --copilot-models", file=sys.stderr)
         return 2
     try:
-        models = with_copilot_auth({})["_models"]
+        auth = with_copilot_auth({})
+        models = copilot_models(auth["_token"], auth["_host"])
     except RuntimeError as e:  # not signed in, or Copilot Chat off: our own words
         print(e, file=sys.stderr)
         return 1

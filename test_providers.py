@@ -175,6 +175,8 @@ assert providers.copilot_route("my-codex", []) == "/responses"
 assert providers.copilot_route("claude-opus-5.5", []) == "/chat/completions"
 assert providers.copilot_route("gpt-5-x", [{"id": "gpt-5-x", "route": "/chat/completions"}]
                                ) == "/chat/completions"  # a listed route beats the guess
+assert providers.copilot_route("gpt-4.1", [5, {"id": "gpt-4.1"}, {"id": "gpt-4.1", "route": ""}]
+                               ) == "/chat/completions"  # a foreign cache shape: by the id
 url, h, b = providers.copilot_request({"model": "gpt-6.1-sol", "_token": "t", "_host": "https://api.business.githubcopilot.com", "_models": mods}, "S", "U")
 assert url.endswith("/responses") and b == {"model": "gpt-6.1-sol", "instructions": "S", "input": [{"role": "user", "content": [{"type": "input_text", "text": "U"}]}], "store": False}
 assert h["Authorization"] == "Bearer t" and h["Copilot-Integration-Id"] == "audax"
@@ -263,6 +265,7 @@ def no_fetch(*a, **k):  # a dictation never fetches the model list; only the CLI
     raise AssertionError("model list fetched on the dictation path")
 
 
+real_copilot_models = providers.copilot_models
 providers.copilot_models = no_fetch
 providers.get_json = no_fetch
 assert providers.with_copilot_auth({})["_models"] == []  # no cache: [], and no fetch
@@ -285,19 +288,38 @@ assert providers.complete("copilot", {"model": "gpt-6.1-sol"}, "S", "U") == "cle
 assert sent[0][0] == "https://api.business.githubcopilot.com/responses"
 assert sent[0][1]["instructions"] == "S" and "messages" not in sent[0][1]
 
-# CLI for the app: the list as a JSON array on stdout; signed out: exit 1, one stderr line.
+# CLI for the app: main's real path (with_copilot_auth, then copilot_models(token, host)), only
+# the GET faked; the list as a JSON array on stdout; signed out: exit 1, one stderr line.
+providers.copilot_models = real_copilot_models  # the CLI is the one path that refreshes
+urllib.request.urlopen = no_fetch  # and still never reaches the network
+gets = []
+providers.get_json = lambda url, headers, timeout: (
+    gets.append((url, headers["Authorization"], timeout)) or raw)
+providers.MODELS_CACHE = Path(tempfile.mkdtemp()) / "models.json"
 out, err = io.StringIO(), io.StringIO()
-providers.copilot_models = lambda token, host: mods  # the CLI is the one path that refreshes
 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
     assert providers.main(["--copilot-models"]) == 0
     providers.gh_token = lambda: ""
     assert providers.main(["--copilot-models"]) == 1
     providers.gh_token = lambda: "gho_t"
-    providers.copilot_models = lambda token, host: []
+    providers.MODELS_CACHE = Path(tempfile.mkdtemp()) / "models.json"
+    providers.get_json = lambda url, headers, timeout: {"data": []}
     assert providers.main(["--copilot-models"]) == 1
-assert json.loads(out.getvalue()) == mods and "gho" not in out.getvalue() + err.getvalue()
+assert gets == [(BIZ + "/models", "Bearer gho_t", 10)]  # token and host in the right order
+assert [m["id"] for m in json.loads(out.getvalue())] == ["gpt-6.1-sol", "gpt-4.1"]
+assert "gho" not in out.getvalue() + err.getvalue()
 assert "not signed in" in err.getvalue() and len(err.getvalue().splitlines()) == 2
-providers.copilot_models = lambda token, host: mods
+out, err = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+    assert providers.main(["--models"]) == 2 and providers.main([]) == 2  # usage
+    providers.copilot_api_host = lambda token: (_ for _ in ()).throw(OSError("bad " + token))
+    assert providers.main(["--copilot-models"]) == 1  # any other failure: its type name only
+assert out.getvalue() == ""
+assert err.getvalue().splitlines() == ["usage: providers.py --copilot-models"] * 2 + [
+    "copilot: model list unavailable (OSError)"]
+providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
+providers.copilot_models = no_fetch
+providers.get_json = no_fetch
 
 
 def http_error(code):

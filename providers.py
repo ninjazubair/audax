@@ -1,5 +1,5 @@
 """The clean-up model providers: one request builder per provider, one HTTP call (post_json;
-get_json only for the Copilot entitlement lookup).
+get_json for the Copilot entitlement lookup and copilot_models).
 
 Python 3.9 standard library only: the app runs this under Apple's /usr/bin/python3, no pip.
 The API key comes in cfg["api_key"] (from the app's stdin) and goes only into a request header;
@@ -193,13 +193,14 @@ def read_models_cache(cache: Path) -> tuple:
     return (fresh, models) if isinstance(models, list) else (False, None)
 
 
-def copilot_models(token: str, host: str, get=get_json, cache: Optional[Path] = None) -> list:
+def copilot_models(token: str, host: str, get=None, cache: Optional[Path] = None) -> list:
     """The seat's pickable models as {"id", "name", "route"}, gpt-6.1-sol first, cached 10 min.
     For the CLI only: a dictation reads the cache and never calls this.
 
     Never raises: on any failure the last cached list, however old, else [].
-    cache defaults to MODELS_CACHE, looked up at call time (as copilot_api_host's).
+    get defaults to get_json and cache to MODELS_CACHE, both looked up at call time.
     """
+    get = get or get_json
     cache = cache or MODELS_CACHE
     fresh, saved = read_models_cache(cache)
     if fresh:
@@ -219,7 +220,8 @@ def copilot_models(token: str, host: str, get=get_json, cache: Optional[Path] = 
 
 def copilot_route(model_id: str, models: list) -> str:
     """The listed route; for a model the list lacks (or no list), a guess from its id."""
-    listed = next((m["route"] for m in models if m.get("id") == model_id), None)
+    listed = next((m["route"] for m in models  # a foreign cache shape: skipped, not raised
+                   if isinstance(m, dict) and m.get("id") == model_id and m.get("route")), None)
     if listed:
         return listed
     # ponytail: id heuristic for the families measured on /responses only (24 Oct 2026); a new

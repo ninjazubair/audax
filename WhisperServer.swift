@@ -41,8 +41,10 @@ final class WhisperServer {
         stopOrphan()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
+        // -bs 5 -bo 5: beam search, as whisper-cli does, so both paths give the same text
+        // (measured 0.143-0.152 s per call against 0.121-0.124 s greedy).
         p.arguments = ["-m", model, "--host", "127.0.0.1", "--port", String(port), "-nt",
-                       "--request-path", requestPath]
+                       "-bs", "5", "-bo", "5", "--request-path", requestPath]
         let fd = open(stateDir + "/whisper-server.log", O_WRONLY | O_CREAT | O_APPEND, 0o644)
         let log = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true)
             : FileHandle.nullDevice
@@ -53,7 +55,12 @@ final class WhisperServer {
             DispatchQueue.main.async { self?.exited(ended) }
         }
         lastStart = Date()  // a launch that fails counts too: keepAlive retries it a minute on
-        guard (try? p.run()) != nil else { return }  // dictate.py uses whisper-cli
+        do {
+            try p.run()
+        } catch {  // dictate.py uses whisper-cli meanwhile
+            let why = error.localizedDescription
+            return appendToLog(["warning": "whisper-server did not start: \(why)"])
+        }
         proc = p
         stopping = false
         try? String(p.processIdentifier).write(toFile: pidPath, atomically: true, encoding: .utf8)
@@ -78,10 +85,16 @@ final class WhisperServer {
 
     /// A server left by an AUDAX that ended without quitting (a crash, SIGKILL) keeps its
     /// 861 MB and the port. It is stopped only while the PID it left still runs a
-    /// whisper-server; by name, since a Homebrew upgrade moves the binary's real path.
+    /// whisper-server (by name, since a Homebrew upgrade moves the binary's real path) whose
+    /// parent is launchd (PID 1): a server whose AUDAX still runs is not an orphan.
     private func stopOrphan() {
         guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8),
               let pid = pid_t(text), pid > 0 else { return }
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0, info.kp_eproc.e_ppid == 1
+        else { return }
         var path = [UInt8](repeating: 0, count: 4 * Int(MAXPATHLEN))  // PROC_PIDPATHINFO_MAXSIZE
         let length = Int(proc_pidpath(pid, &path, UInt32(path.count)))
         let name = "/" + URL(fileURLWithPath: binary).lastPathComponent

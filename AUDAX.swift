@@ -93,8 +93,10 @@ final class Chime {
         engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
-    func play(_ notes: [Double], step: Double = 0.085, length: Double = 0.22) {
-        guard let buf = render(notes, step: step, length: length) else { return }
+    func play(_ notes: [Double], step: Double = 0.085, length: Double = 0.22,
+              amplitude: Double = 0.28) {
+        guard let buf = render(notes, step: step, length: length, amplitude: amplitude)
+        else { return }
         if !engine.isRunning { try? engine.start() }
         // No sound and a log line, not a crash: play() on an engine that failed to start raises an
         // Objective-C exception ("player did not see an IO cycle", seen with audio output wedged).
@@ -118,7 +120,8 @@ final class Chime {
         }
     }
 
-    func render(_ notes: [Double], step: Double, length: Double) -> AVAudioPCMBuffer? {
+    func render(_ notes: [Double], step: Double, length: Double,
+                amplitude: Double) -> AVAudioPCMBuffer? {
         let rate = format.sampleRate
         let frames = AVAudioFrameCount((step * Double(notes.count - 1) + length) * rate)
         guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
@@ -131,13 +134,13 @@ final class Chime {
                 let t = Double(i) / rate
                 let envelope = min(1, t / 0.004) * exp(-t * 14)
                 let wave = sin(2 * .pi * freq * t) + 0.25 * sin(4 * .pi * freq * t)
-                out[start + i] += Float(0.35 * envelope * wave)
+                out[start + i] += Float(amplitude * envelope * wave)
             }
         }
         return buf
     }
 
-    func start() { play([659.3, 987.8]) }  // rising E-B, 0.31 s: recording started
+    func start() { play([659.3, 987.8], amplitude: 0.35) }  // rising E-B, 0.31 s: recording
     func done() { play([784.0, 1046.5], step: 0.09, length: 0.2) }  // soft G-C: text pasted
     func nothing() { play([392.0, 293.7], step: 0.12, length: 0.25) }  // low, soft
 }
@@ -662,8 +665,9 @@ final class App: NSObject, NSApplicationDelegate {
         if settings.sounds { chime.start() }
         hud.show()
         // Start the mic 0.1 s in: later clips the first syllable of someone who talks the moment
-        // they press. The 0.31 s start sound's fading tail is recorded; the meter's warm-up
-        // (to 0.35 s) keeps it out of the silence check.
+        // they press. So the last ≈0.2 s of the 0.31 s start sound is recorded. The silence
+        // check counts readings from 0.25 s after the mic starts (0.35 s after the press);
+        // whether that warm-up skip keeps the tail out of it is unmeasured.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self, self.phase == .recording else { return }
             self.startRecorder()

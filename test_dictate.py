@@ -222,7 +222,9 @@ FakeWhisper.reply = b'{"error": "failed to read audio data"}'  # the server's ow
 assert dictate.transcribe(wav, [], "en", server_url=url) == ("fallback text", "cli")
 FakeWhisper.reply = b"<html>not json</html>"
 assert dictate.transcribe(wav, [], "en", server_url=url) == ("fallback text", "cli")
-assert calls == ["cli", "cli", "cli"]
+FakeWhisper.reply = b'{"text": null}'  # JSON, but no transcript in it
+assert dictate.transcribe(wav, [], "en", server_url=url)[1] == "cli"
+assert calls == ["cli", "cli", "cli", "cli"]
 dictate.transcribe_cli = real_cli
 fake.shutdown()
 mute = socket.socket()  # accepts the connection, never answers: a timeout is an OSError too

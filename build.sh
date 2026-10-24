@@ -7,7 +7,7 @@
 # kept: stray AUDAX.app copies would each show up in Launchpad and Spotlight.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.2.1"
+VERSION="0.3.0"
 # Explicit: swiftc's default deployment target follows the build Mac and came out as 28.0 on
 # macOS 27.0.1, which LaunchServices refuses to open. 14.0: the code uses macOS 14 APIs.
 MIN_MACOS="14.0"

@@ -2,11 +2,18 @@
 """Turn one recording into clean text: transcribe locally, then clean up with a model.
 
 Called by AUDAX.app as: python3 -B dictate.py <recording.wav>, with one JSON object of settings
-on stdin: {"provider", "model", "language", "cleanup": "full"|"light"|"off", "api_key"} (see
-DEFAULT_CONFIG; never logged, it can carry an API key). Prints one JSON object on stdout,
-{"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text, and "skipped"
-means the raw transcript because the clean-up failed. Exit codes: 0 text printed, 3 nothing
-usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't open file".
+on stdin: {"provider", "model", "language", "cleanup": "full"|"light"|"off", "api_key",
+"whisper_path"} (see DEFAULT_CONFIG; never logged, it can carry an API key). Prints one JSON
+object on stdout, {"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text,
+and "skipped" means the raw transcript because the clean-up failed. Exit codes: 0 text printed,
+3 nothing usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't open file".
+
+Transcription: the app keeps whisper.cpp's whisper-server running on 127.0.0.1:18777 with the
+model loaded. It answers only under a random request path the app picks at each launch and
+passes on stdin as "whisper_path", so a web page cannot reach it. When the server is not
+running, refuses, times out or replies without a usable transcript, whisper-cli transcribes
+instead: the same model, loaded for that one recording, so slower. The log's "stt" field says
+which one ran ("server" or "cli").
 
 Clean-up providers (providers.py): "ollama" (local Ollama, the default), "copilot" (GitHub
 Copilot, token from the GitHub CLI), "claude" (Anthropic) and "openai" (OpenAI), the last two
@@ -172,10 +179,13 @@ def transcribe_server(wav: Path, vocab: list, language: str, url: str,
 
 def transcribe(wav: Path, vocab: list, language: str, server_url: str) -> tuple:
     """(text, "server"|"cli"). whisper-cli whenever the server is not running, refuses, times
-    out or replies without a "text" (OSError covers URLError, HTTPError and timeouts)."""
+    out, breaks off or replies without a usable "text" (OSError covers URLError, HTTPError and
+    timeouts; TypeError and AttributeError a null text or a JSON list; HTTPException a cut-off
+    reply such as IncompleteRead)."""
     try:
         return transcribe_server(wav, vocab, language, url=server_url), "server"
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError,
+            http.client.HTTPException):
         return transcribe_cli(wav, vocab, language), "cli"
 
 

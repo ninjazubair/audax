@@ -300,6 +300,11 @@ struct SettingsView: View {
             refreshKey()
             fetchModels()
         }
+        .onChange(of: model.gitHub) {  // signed in from this window: the fetch can now work
+            guard model.gitHub == .signedIn else { return }
+            copilotModels = []  // perhaps as someone else, whose seat lists other models
+            fetchModels()  // Copilot only; for another provider, on the next switch
+        }
     }
 
     var modelName: Binding<String> {

@@ -13,7 +13,8 @@ final class KeyTap {
     private var port: CFMachPort?
     private var source: CFRunLoopSource?
     private var shortcuts: [(id: UInt32, shortcut: Shortcut)] = []
-    private var fnDown = false
+    // From the system, so a tap made while Fn is down still sees its release.
+    private var fnDown = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
     private var held: [UInt32: UInt32] = [:]  // keyCode → id of a matched Fn+key still down
 
     init?() {

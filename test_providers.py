@@ -10,8 +10,12 @@ from pathlib import Path
 
 import providers
 
-UA = "AUDAX/0.3.0"
-assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/0.3.0"
+# The version comes from the VERSION file, so no release edits this test.
+UA = providers.USER_AGENT
+assert UA.startswith("AUDAX/") and UA == "AUDAX/" + providers.APP_VERSION
+assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/" + providers.APP_VERSION
+assert providers.APP_VERSION != "dev"  # the repo's VERSION file was found and read
+assert providers.read_version(Path(tempfile.mkdtemp()) / "VERSION") == "dev"  # missing: no raise
 
 
 def raising(exc):

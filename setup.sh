@@ -39,5 +39,6 @@ if [ "${SKIP_CLEANUP:-0}" != "1" ]; then
 fi
 
 echo
-echo "AUDAX is ready. Close this window, then hold Ctrl+Option+D (⌃⌥D, the default) in any"
-echo "text field, speak, and let go."
+echo "AUDAX is ready. Close this window, then hold Fn in any text field, speak, and let go."
+echo "Tip: set System Settings > Keyboard > 'Press 🌐 key to' to Do Nothing so macOS does "\
+"not also react to Fn."

@@ -1,7 +1,7 @@
-// AUDAX: menu-bar dictation app. Owns two global shortcuts set in Settings (hold one to talk,
-// press the other for hands-free; Carbon hot keys, or the KeyTap for Fn ones), records the mic
-// with a live voice meter, hands the WAV to the bundled dictate.py (local transcribe + clean-up),
-// then pastes the text into the app the user was typing in.
+// AUDAX: dictation app, in the Dock and the menu bar. Owns two global shortcuts set in Settings
+// (hold one to talk, press the other for hands-free; Carbon hot keys, or the KeyTap for Fn ones),
+// records the mic with a live voice meter, hands the WAV to the bundled dictate.py (local
+// transcribe + clean-up), then pastes the text into the app the user was typing in.
 import AVFoundation
 import ApplicationServices
 import Carbon.HIToolbox
@@ -197,7 +197,10 @@ final class HUD {
         panel.hasShadow = true
         panel.level = .statusBar
         panel.ignoresMouseEvents = true  // never takes focus from the app being typed into
+        panel.hidesOnDeactivate = false  // NSPanel's default hides it when AUDAX is not in front
+        panel.canHide = false  // ⌘H on AUDAX leaves the pill up
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isExcludedFromWindowsMenu = true  // the Window menu lists AUDAX's real windows only
         panel.contentView = pill
     }
 
@@ -285,13 +288,14 @@ final class App: NSObject, NSApplicationDelegate {
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
-    var axTrusted = AXIsProcessTrusted()  // Accessibility at the last check: a new grant renews
+    var axTrusted = AXIsProcessTrusted()  // Accessibility at the last idle check: a grant renews
     var usr1: DispatchSourceSignal?
     var term: DispatchSourceSignal?
     var recorder: AVAudioRecorder?
     var timer: Timer?
     var target: NSRunningApplication?  // the app that had focus when the shortcut was pressed
     var targetIsSelf = false  // dictating into AUDAX's own window (its "Try it here" box)
+    var lastOtherApp: NSRunningApplication?  // the last app in front that is not AUDAX
     var voice = VoiceMeter()
     let model = Model()
     let settings = Settings()
@@ -311,7 +315,7 @@ final class App: NSObject, NSApplicationDelegate {
         },
         fetchCopilotModels: { [unowned self] in self.fetchCopilotModels($0) })
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
-    lazy var settingsWindow = SettingsWindow(settings: settings, model: model, actions: actions)
+    var settingsWindow: SettingsWindow?  // made on first open, so windowOnScreen never makes it
     var checkTimer: Timer?
     var keepAliveTimer: Timer?  // keeps the local clean-up model loaded while AUDAX runs
     var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
@@ -325,6 +329,7 @@ final class App: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
         whisperServer.keepAlive()  // first, so the model loads while the rest starts up
         buildMenu()
+        buildMainMenu()
         installHotKeyHandler()
         startKeyTap()
         if keyTap == nil {
@@ -350,14 +355,26 @@ final class App: NSObject, NSApplicationDelegate {
         term?.resume()
         refreshIcon()
         checkTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.refreshChecks()
-            self?.whisperServer.keepAlive()  // restarts it, at most once a minute
+            guard let self = self else { return }
+            // Every tick: the Fn tap's renewal and the server's keep-alive. The check rows' probes
+            // (Ollama over HTTP, a gh process, the Keychain) only while a window shows them.
+            if self.windowOnScreen { self.refreshChecks() } else { self.renewKeyTap() }
+            self.whisperServer.keepAlive()  // restarts it, at most once a minute
         }
+        checkTimer?.tolerance = 1  // lets macOS batch the wake-ups
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 240,
                                               repeats: true) { [weak self] _ in
             self?.warmCleanupModel()  // gated inside: local Ollama with clean-up on
         }
+        keepAliveTimer?.tolerance = 10
         warmCleanupModel()  // now, not 4 minutes from now
+        rememberOtherApp(NSWorkspace.shared.frontmostApplication)  // where AUDAX was opened from
+        _ = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil,
+            queue: .main) { [weak self] note in
+            let key = NSWorkspace.applicationUserInfoKey
+            self?.rememberOtherApp(note.userInfo?[key] as? NSRunningApplication)
+        }
         showWindow()
     }
 
@@ -371,13 +388,46 @@ final class App: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Closing the windows leaves AUDAX running: the shortcuts work with no window open.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// Right-click on the Dock icon. Start / stop runs startDictation, so the text goes to the
+    /// app in front or, if AUDAX is in front with no window of its own key, the app before it.
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Start / stop dictation   \(settings.handsFreeKey.display)",
+                                action: #selector(toggle), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
+                                keyEquivalent: ""))
+        menu.items.forEach { $0.target = self }
+        return menu
+    }
+
+    /// Kept for a dictation started while AUDAX is in front with none of its windows key (the
+    /// last one closed): the text goes to the app the user was in before.
+    func rememberOtherApp(_ app: NSRunningApplication?) {
+        guard let app = app, app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        lastOtherApp = app
+    }
+
     @objc func showWindow() {
         refreshChecks()
         model.recent = loadRecent()
         mainWindow.show()
     }
 
-    @objc func showSettings() { settingsWindow.show() }
+    @objc func showSettings() {
+        let window = settingsWindow ?? SettingsWindow(settings: settings, model: model,
+                                                      actions: actions)
+        settingsWindow = window
+        window.show()
+        refreshChecks()  // the timer skipped the probes while no window showed
+    }
+
+    /// The main or the Settings window is on screen: open, not minimised, AUDAX not hidden.
+    var windowOnScreen: Bool {
+        mainWindow.window.isVisible || settingsWindow?.window.isVisible == true
+    }
 
     /// For the Settings model picker: the list on a background queue, the completion on main.
     func fetchCopilotModels(_ completion: @escaping ([CopilotModel]) -> Void) {
@@ -388,20 +438,13 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// The windows' check rows; also renews the Fn tap. The timer runs it only while a window
+    /// shows, and renewKeyTap alone otherwise.
     func refreshChecks() {
+        renewKeyTap()
         model.micOK = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        let wasTrusted = axTrusted
-        axTrusted = AXIsProcessTrusted()
-        model.pasteOK = axTrusted
+        model.pasteOK = AXIsProcessTrusted()  // axTrusted waits for idle
         model.engineOK = !needsSetup()
-        // Accessibility granted since the last check (a tap from before a revoke may still count
-        // as enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil
-        // first, so its deinit removes the old tap before the new one exists.
-        if axTrusted, !wasTrusted || keyTap?.isActive != true {
-            keyTap = nil
-            startKeyTap()
-            if keyTap != nil { registerHotKeys() }  // hands it the Fn shortcuts
-        }
         model.tapOK = keyTap?.isActive ?? false
         model.globeConflict = globeKeyConflict
         switch settings.provider {
@@ -409,6 +452,20 @@ final class App: NSObject, NSApplicationDelegate {
         case "copilot": checkGitHub()
         default: model.cleanupOK = Keychain.has(account: settings.provider)  // claude, openai
         }
+    }
+
+    /// Accessibility granted since the last check (a tap from before a revoke may still count as
+    /// enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil first,
+    /// so its deinit removes the old tap before the new one exists. Idle only, so a renewal never
+    /// lands inside a recording; a grant meanwhile is seen on the first idle check.
+    func renewKeyTap() {
+        guard phase == .idle else { return }
+        let wasTrusted = axTrusted
+        axTrusted = AXIsProcessTrusted()
+        guard axTrusted, !wasTrusted || keyTap?.isActive != true else { return }
+        keyTap = nil
+        startKeyTap()
+        if keyTap != nil { registerHotKeys() }  // hands it the Fn shortcuts
     }
 
     /// Signed in to GitHub, from a background `gh auth token` probe at most every 30 s; between
@@ -541,6 +598,58 @@ final class App: NSObject, NSApplicationDelegate {
         item.menu = menu
     }
 
+    /// The menu bar while AUDAX is in front, built once. Standard selectors with no target go to
+    /// the first responder, so AppKit enables them: Edit works in Settings and the Try-it box,
+    /// Minimize only for a window that can. The status menu keeps its own ⌘, and ⌘Q: AppKit
+    /// matches key presses against the main menu, so those act only while that menu is open.
+    func buildMainMenu() {
+        let aboutItem = menuItem("About AUDAX", #selector(showAbout))
+        let settingsItem = menuItem("Settings…", #selector(showSettings), ",")
+        [aboutItem, settingsItem].forEach { $0.target = self }
+        let appMenu = NSMenu(title: "AUDAX")
+        appMenu.items = [
+            aboutItem, .separator(), settingsItem, .separator(),
+            menuItem("Hide AUDAX", #selector(NSApplication.hide(_:)), "h"),
+            menuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h",
+                     [.command, .option]),
+            menuItem("Show All", #selector(NSApplication.unhideAllApplications(_:))),
+            .separator(),
+            menuItem("Quit AUDAX", #selector(NSApplication.terminate(_:)), "q")]
+        let edit = NSMenu(title: "Edit")
+        edit.items = [
+            menuItem("Undo", Selector(("undo:")), "z"),  // no Swift name for the responder action
+            menuItem("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            .separator(),
+            menuItem("Cut", #selector(NSText.cut(_:)), "x"),
+            menuItem("Copy", #selector(NSText.copy(_:)), "c"),
+            menuItem("Paste", #selector(NSText.paste(_:)), "v"),
+            menuItem("Select All", #selector(NSText.selectAll(_:)), "a")]
+        let windows = NSMenu(title: "Window")
+        windows.items = [
+            menuItem("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+            menuItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
+            menuItem("Zoom", #selector(NSWindow.performZoom(_:))),
+            .separator(),
+            menuItem("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)))]
+        let bar = NSMenu()
+        for menu in [appMenu, edit, windows] {
+            let top = NSMenuItem(title: menu.title, action: nil, keyEquivalent: "")
+            top.submenu = menu
+            bar.addItem(top)
+        }
+        NSApp.mainMenu = bar
+        NSApp.windowsMenu = windows  // AppKit lists the open windows here
+    }
+
+    /// "Version 0.3.1 (20261024-121737)": the bundle's short version (build.sh, from VERSION),
+    /// then its build stamp in parentheses. Named explicitly, not left to AppKit's defaults.
+    @objc func showAbout() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: info["CFBundleShortVersionString"] as? String ?? "dev",
+            .version: info["CFBundleVersion"] as? String ?? ""])
+    }
+
     /// Installed once at launch: every registered hot key reports press and release to `hotKey`.
     /// Carbon hot keys need no Accessibility permission, unlike a global key monitor.
     func installHotKeyHandler() {
@@ -653,10 +762,16 @@ final class App: NSObject, NSApplicationDelegate {
 
     func startDictation(mode: RecordMode) {
         if needsSetup() { return offerSetup() }
-        // An accessory (menu-bar) app is not reported as frontmost even when its window is
-        // active, so check AUDAX's own state first.
-        targetIsSelf = NSApp.isActive && mainWindow.window.isKeyWindow
-        target = targetIsSelf ? nil : NSWorkspace.shared.frontmostApplication
+        // AUDAX's own main window first: its Try-it box gets the text directly, never by ⌘V.
+        // Settings key: AUDAX is the frontmost app and gets ⌘V as any app. AUDAX in front with
+        // neither window key (both closed, the About panel): the app the user was in before, or
+        // the clipboard only when there is none (paste). Another app in front: that app.
+        // Nothing here activates AUDAX: a hot key leaves the app in front where it is.
+        let active = NSApp.isActive
+        let settingsKey = settingsWindow?.window.isKeyWindow == true
+        targetIsSelf = active && mainWindow.window.isKeyWindow
+        target = targetIsSelf ? nil
+            : active && !settingsKey ? lastOtherApp : NSWorkspace.shared.frontmostApplication
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
                 if granted { self.beginRecording(mode: mode) } else {
@@ -838,6 +953,8 @@ final class App: NSObject, NSApplicationDelegate {
 
     /// Puts the text on the clipboard (it stays there, like Blip) and pastes it into the app the
     /// user started dictating in, bringing that app back to the front if they switched away.
+    /// No such app (none known, or quit since): the clipboard only, never ⌘V into whatever is
+    /// in front.
     func paste(_ text: String) {
         copyToClipboard(text)
         // Smoke runs set this, so a test can never paste into the app in front.
@@ -848,14 +965,18 @@ final class App: NSObject, NSApplicationDelegate {
             model.scratch += (model.scratch.isEmpty ? "" : " ") + text
             return appendToLog(["paste_into": "AUDAX window"])
         }
+        guard let app = target, !app.isTerminated else {
+            appendToLog(["paste": "clipboard only: no app to paste into"])
+            return hud.flash("Copied to the clipboard", seconds: 2)
+        }
         guard AXIsProcessTrusted() else {
             appendToLog(["paste": "blocked: AUDAX is not allowed under Accessibility"])
             hud.flash("Copied. Allow AUDAX in Accessibility to paste automatically", seconds: 4)
             return openAccessibility()
         }
         let front = NSWorkspace.shared.frontmostApplication
-        appendToLog(["paste_into": target?.localizedName ?? "?", "front": front?.localizedName ?? "?"])
-        if let app = target, !app.isTerminated, app.processIdentifier != front?.processIdentifier {
+        appendToLog(["paste_into": app.localizedName ?? "?", "front": front?.localizedName ?? "?"])
+        if app.processIdentifier != front?.processIdentifier {
             app.activate()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.sendCommandV() }
         } else {
@@ -885,11 +1006,13 @@ final class App: NSObject, NSApplicationDelegate {
         if let url = URL(string: pane) { NSWorkspace.shared.open(url) }
     }
 
+    /// The menu-bar mic and the Dock badge follow the phase.
     func refreshIcon() {
         let active = phase != .idle
         item.button?.image = NSImage(systemSymbolName: active ? "mic.fill" : "mic",
                                      accessibilityDescription: active ? "Recording" : "AUDAX")
         item.button?.contentTintColor = phase == .recording ? .systemRed : nil
+        NSApp.dockTile.badgeLabel = [Phase.recording: "●", .transcribing: "…"][phase]  // idle: nil
     }
 
     func alert(_ text: String) {
@@ -902,6 +1025,14 @@ final class App: NSObject, NSApplicationDelegate {
 }
 
 func bringToFront() { NSApp.activate() }  // macOS 14 API; build.sh's MIN_MACOS is 14.0
+
+/// A main-menu item with no target: AppKit sends `action` to the first responder.
+func menuItem(_ title: String, _ action: Selector, _ key: String = "",
+              _ modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+    let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+    item.keyEquivalentModifierMask = modifiers
+    return item
+}
 
 func copyToClipboard(_ text: String) {
     NSPasteboard.general.clearContents()

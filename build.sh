@@ -7,7 +7,9 @@
 # kept: stray AUDAX.app copies would each show up in Launchpad and Spotlight.
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
-VERSION="0.3.0"
+# The version lives only in the VERSION file at the repo root; providers.py reads its bundled copy.
+VERSION="$(tr -d '[:space:]' 2>/dev/null < "$DIR/VERSION" || true)"
+[ -n "$VERSION" ] || { echo "build.sh: $DIR/VERSION is missing or empty" >&2; exit 1; }
 # Explicit: swiftc's default deployment target follows the build Mac and came out as 28.0 on
 # macOS 27.0.1, which LaunchServices refuses to open. 14.0: the code uses macOS 14 APIs.
 MIN_MACOS="14.0"
@@ -42,7 +44,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 swiftc -O -swift-version 5 -target "arm64-apple-macos$MIN_MACOS" -o "$APP/Contents/MacOS/AUDAX" \
   "$DIR/main.swift" "$DIR/AUDAX.swift" "$DIR/AUDAXWindow.swift" "$DIR/Shortcut.swift" \
   "$DIR/Settings.swift" "$DIR/KeyTap.swift" "$DIR/WhisperServer.swift"
-cp "$DIR/dictate.py" "$DIR/providers.py" "$DIR/word_subs.json" "$DIR/setup.sh" \
+cp "$DIR/dictate.py" "$DIR/providers.py" "$DIR/VERSION" "$DIR/word_subs.json" "$DIR/setup.sh" \
   "$DIR/assets/AppIcon.icns" "$APP/Contents/Resources/"
 chmod +x "$APP/Contents/Resources/setup.sh"
 cat > "$APP/Contents/Info.plist" <<EOF
@@ -58,7 +60,6 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$STAMP</string>
   <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
-  <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>AUDAX records your voice for local dictation.</string>
 </dict></plist>
 EOF

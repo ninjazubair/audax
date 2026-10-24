@@ -22,13 +22,26 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-USER_AGENT = "AUDAX/0.3.1"
+
+def read_version(path: Path) -> str:
+    """The app's version from the VERSION file (repo root, or next to this script in the app).
+
+    "dev" when it is missing, empty or unreadable: a version string never fails a clean-up.
+    """
+    try:
+        return path.read_text(encoding="utf-8").strip() or "dev"
+    except (OSError, ValueError):  # ValueError: not UTF-8
+        return "dev"
+
+
+APP_VERSION = read_version(Path(__file__).with_name("VERSION"))
+USER_AGENT = "AUDAX/" + APP_VERSION
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 STATE = Path.home() / ".cache/mac-dictation"
 GH_PATHS = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]  # an app's PATH has no Homebrew
-COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/0.3.1",
+COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/" + APP_VERSION,
                    "X-GitHub-Api-Version": "2025-04-01", "User-Agent": USER_AGENT}
 COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
 COPILOT_DEFAULT_API = "https://api.githubcopilot.com"

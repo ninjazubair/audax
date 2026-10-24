@@ -603,12 +603,12 @@ final class App: NSObject, NSApplicationDelegate {
     /// Minimize only for a window that can. The status menu keeps its own ⌘, and ⌘Q: AppKit
     /// matches key presses against the main menu, so those act only while that menu is open.
     func buildMainMenu() {
+        let aboutItem = menuItem("About AUDAX", #selector(showAbout))
         let settingsItem = menuItem("Settings…", #selector(showSettings), ",")
-        settingsItem.target = self
+        [aboutItem, settingsItem].forEach { $0.target = self }
         let appMenu = NSMenu(title: "AUDAX")
         appMenu.items = [
-            menuItem("About AUDAX", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
-            .separator(), settingsItem, .separator(),
+            aboutItem, .separator(), settingsItem, .separator(),
             menuItem("Hide AUDAX", #selector(NSApplication.hide(_:)), "h"),
             menuItem("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h",
                      [.command, .option]),
@@ -639,6 +639,15 @@ final class App: NSObject, NSApplicationDelegate {
         }
         NSApp.mainMenu = bar
         NSApp.windowsMenu = windows  // AppKit lists the open windows here
+    }
+
+    /// "Version 0.3.1 (20261024-121737)": the bundle's short version (build.sh, from VERSION),
+    /// then its build stamp in parentheses. Named explicitly, not left to AppKit's defaults.
+    @objc func showAbout() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: info["CFBundleShortVersionString"] as? String ?? "dev",
+            .version: info["CFBundleVersion"] as? String ?? ""])
     }
 
     /// Installed once at launch: every registered hot key reports press and release to `hotKey`.

@@ -12,6 +12,8 @@ let wavURL = URL(fileURLWithPath: stateDir + "/rec.wav")
 let logPath = stateDir + "/dictation.log"
 let userSubsPath = stateDir + "/word_subs.json"  // dictate.py's USER_SUBS, not the bundled file
 let whisperCLI = "/opt/homebrew/bin/whisper-cli"
+let whisperServerBinary = "/opt/homebrew/bin/whisper-server"
+let whisperServerPort = 18777  // dictate.py's WHISPER_SERVER
 let modelPath = stateDir + "/models/ggml-large-v3-turbo-q5_0.bin"
 let minRecordSeconds = 0.3  // shorter than this is "didn't catch that", never transcribed
 let voiceFloorDB: Float = -50  // loudest tick below this is silence, never transcribed
@@ -269,6 +271,8 @@ final class App: NSObject, NSApplicationDelegate {
     let script = Bundle.main.path(forResource: "dictate", ofType: "py") ?? ""
     let hud = HUD()
     let chime = Chime()
+    let whisperServer = WhisperServer(binary: whisperServerBinary, model: modelPath,
+                                      port: whisperServerPort)
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
     var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
@@ -308,6 +312,10 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        if fm.isExecutableFile(atPath: whisperServerBinary), fm.fileExists(atPath: modelPath) {
+            whisperServer.start()  // first, so the model loads while the rest starts up
+        }
         buildMenu()
         installHotKeyHandler()
         startKeyTap()
@@ -335,6 +343,10 @@ final class App: NSObject, NSApplicationDelegate {
         }
         warmCleanupModel()  // now, not 4 minutes from now
         showWindow()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        whisperServer.stop()
     }
 
     /// Clicking AUDAX in Launchpad, Finder or the Dock while it runs opens the window.

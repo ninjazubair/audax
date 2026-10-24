@@ -197,6 +197,8 @@ final class HUD {
         panel.hasShadow = true
         panel.level = .statusBar
         panel.ignoresMouseEvents = true  // never takes focus from the app being typed into
+        panel.hidesOnDeactivate = false  // NSPanel's default hides it when AUDAX is not in front
+        panel.canHide = false  // ⌘H on AUDAX leaves the pill up
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isExcludedFromWindowsMenu = true  // the Window menu lists AUDAX's real windows only
         panel.contentView = pill
@@ -293,6 +295,7 @@ final class App: NSObject, NSApplicationDelegate {
     var timer: Timer?
     var target: NSRunningApplication?  // the app that had focus when the shortcut was pressed
     var targetIsSelf = false  // dictating into AUDAX's own window (its "Try it here" box)
+    var lastOtherApp: NSRunningApplication?  // the last app in front that is not AUDAX
     var voice = VoiceMeter()
     let model = Model()
     let settings = Settings()
@@ -358,11 +361,20 @@ final class App: NSObject, NSApplicationDelegate {
             if self.windowOnScreen { self.refreshChecks() } else { self.renewKeyTap() }
             self.whisperServer.keepAlive()  // restarts it, at most once a minute
         }
+        checkTimer?.tolerance = 1  // lets macOS batch the wake-ups
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 240,
                                               repeats: true) { [weak self] _ in
             self?.warmCleanupModel()  // gated inside: local Ollama with clean-up on
         }
+        keepAliveTimer?.tolerance = 10
         warmCleanupModel()  // now, not 4 minutes from now
+        rememberOtherApp(NSWorkspace.shared.frontmostApplication)  // where AUDAX was opened from
+        _ = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil,
+            queue: .main) { [weak self] note in
+            let key = NSWorkspace.applicationUserInfoKey
+            self?.rememberOtherApp(note.userInfo?[key] as? NSRunningApplication)
+        }
         showWindow()
     }
 
@@ -379,8 +391,8 @@ final class App: NSObject, NSApplicationDelegate {
     /// Closing the windows leaves AUDAX running: the shortcuts work with no window open.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// Right-click on the Dock icon. AppKit does not activate an app for its Dock menu (not yet
-    /// checked at runtime), so a dictation started here pastes into the app in front.
+    /// Right-click on the Dock icon. Start / stop runs startDictation, so the text goes to the
+    /// app in front or, if AUDAX is in front with no window of its own key, the app before it.
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Start / stop dictation   \(settings.handsFreeKey.display)",
@@ -389,6 +401,13 @@ final class App: NSObject, NSApplicationDelegate {
                                 keyEquivalent: ""))
         menu.items.forEach { $0.target = self }
         return menu
+    }
+
+    /// Kept for a dictation started while AUDAX is in front with none of its windows key (the
+    /// last one closed): the text goes to the app the user was in before.
+    func rememberOtherApp(_ app: NSRunningApplication?) {
+        guard let app = app, app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+        lastOtherApp = app
     }
 
     @objc func showWindow() {
@@ -607,6 +626,7 @@ final class App: NSObject, NSApplicationDelegate {
             menuItem("Select All", #selector(NSText.selectAll(_:)), "a")]
         let windows = NSMenu(title: "Window")
         windows.items = [
+            menuItem("Close Window", #selector(NSWindow.performClose(_:)), "w"),
             menuItem("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"),
             menuItem("Zoom", #selector(NSWindow.performZoom(_:))),
             .separator(),
@@ -734,10 +754,15 @@ final class App: NSObject, NSApplicationDelegate {
     func startDictation(mode: RecordMode) {
         if needsSetup() { return offerSetup() }
         // AUDAX's own main window first: its Try-it box gets the text directly, never by ⌘V.
-        // Any other AUDAX window in front (Settings) is the frontmost app and gets ⌘V as any app.
+        // Settings key: AUDAX is the frontmost app and gets ⌘V as any app. AUDAX in front with
+        // neither window key (both closed, the About panel): the app the user was in before, or
+        // the clipboard only when there is none (paste). Another app in front: that app.
         // Nothing here activates AUDAX: a hot key leaves the app in front where it is.
-        targetIsSelf = NSApp.isActive && mainWindow.window.isKeyWindow
-        target = targetIsSelf ? nil : NSWorkspace.shared.frontmostApplication
+        let active = NSApp.isActive
+        let settingsKey = settingsWindow?.window.isKeyWindow == true
+        targetIsSelf = active && mainWindow.window.isKeyWindow
+        target = targetIsSelf ? nil
+            : active && !settingsKey ? lastOtherApp : NSWorkspace.shared.frontmostApplication
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
                 if granted { self.beginRecording(mode: mode) } else {
@@ -919,6 +944,8 @@ final class App: NSObject, NSApplicationDelegate {
 
     /// Puts the text on the clipboard (it stays there, like Blip) and pastes it into the app the
     /// user started dictating in, bringing that app back to the front if they switched away.
+    /// No such app (none known, or quit since): the clipboard only, never ⌘V into whatever is
+    /// in front.
     func paste(_ text: String) {
         copyToClipboard(text)
         // Smoke runs set this, so a test can never paste into the app in front.
@@ -929,14 +956,18 @@ final class App: NSObject, NSApplicationDelegate {
             model.scratch += (model.scratch.isEmpty ? "" : " ") + text
             return appendToLog(["paste_into": "AUDAX window"])
         }
+        guard let app = target, !app.isTerminated else {
+            appendToLog(["paste": "clipboard only: no app to paste into"])
+            return hud.flash("Copied to the clipboard", seconds: 2)
+        }
         guard AXIsProcessTrusted() else {
             appendToLog(["paste": "blocked: AUDAX is not allowed under Accessibility"])
             hud.flash("Copied. Allow AUDAX in Accessibility to paste automatically", seconds: 4)
             return openAccessibility()
         }
         let front = NSWorkspace.shared.frontmostApplication
-        appendToLog(["paste_into": target?.localizedName ?? "?", "front": front?.localizedName ?? "?"])
-        if let app = target, !app.isTerminated, app.processIdentifier != front?.processIdentifier {
+        appendToLog(["paste_into": app.localizedName ?? "?", "front": front?.localizedName ?? "?"])
+        if app.processIdentifier != front?.processIdentifier {
             app.activate()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { self.sendCommandV() }
         } else {

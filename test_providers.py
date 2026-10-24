@@ -10,8 +10,8 @@ from pathlib import Path
 
 import providers
 
-UA = "AUDAX/0.3.0"
-assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/0.3.0"
+UA = "AUDAX/0.3.1"
+assert providers.COPILOT_HEADERS["Editor-Version"] == "audax/0.3.1"
 
 
 def raising(exc):

@@ -22,13 +22,13 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-USER_AGENT = "AUDAX/0.3.0"
+USER_AGENT = "AUDAX/0.3.1"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 STATE = Path.home() / ".cache/mac-dictation"
 GH_PATHS = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"]  # an app's PATH has no Homebrew
-COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/0.3.0",
+COPILOT_HEADERS = {"Copilot-Integration-Id": "audax", "Editor-Version": "audax/0.3.1",
                    "X-GitHub-Api-Version": "2025-04-01", "User-Agent": USER_AGENT}
 COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
 COPILOT_DEFAULT_API = "https://api.githubcopilot.com"

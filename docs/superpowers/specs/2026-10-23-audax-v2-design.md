@@ -46,7 +46,8 @@ code read 23 Oct)
 ### Shortcuts (owner)
 - Both shortcuts are set in Settings by clicking a field and pressing the keys. Stored and
   re-registered immediately; the UI text everywhere shows the current keys.
-- A shortcut must include at least one modifier, and the two must differ **(my call)**.
+- A shortcut must include ⌃ or ⌥ (⇧-only and ⌘-only combos are rejected: a global ⇧D or ⌘W would
+  steal that key from every app), and the two must differ **(my call)**.
 
 ### Sounds (owner wants a different end sound)
 - Start: one short soft tick. Finish of recording: no sound (the pill says "Transcribing…").
@@ -116,7 +117,8 @@ setting, not a third hotkey — **my call**)
 
 ## Constraints
 - Python 3.9 syntax only (Apple's `/usr/bin/python3` is 3.9.6). No third-party packages.
-- Swift compiled by `build.sh` with `swiftc -swift-version 5`; macOS 13+.
+- Swift compiled by `build.sh` with `swiftc -swift-version 5`; macOS 14+ (`MIN_MACOS="14.0"` pins
+  the deployment target explicitly; swiftc's default was the SDK version, which this Mac cannot run).
 - Carbon hot keys (no Accessibility needed for them); key release via `kEventHotKeyReleased`.
 - Secrets never in `ps`-visible places: no argv, no environment, no log lines.
 - Tests: `/usr/bin/python3 test_dictate.py` style (plain asserts), plus `test_providers.py`.

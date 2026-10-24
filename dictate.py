@@ -6,7 +6,8 @@ on stdin: {"provider", "model", "language", "cleanup": "full"|"light"|"off", "ap
 "whisper_path"} (see DEFAULT_CONFIG) plus, for the 0.4.0 providers, "base_url", "auth_header",
 "api_version", "region", "aws_auth", "aws_access_key_id", "aws_secret_access_key",
 "aws_session_token" and "aws_profile" (never logged, it can carry secrets). Any non-empty value
-in ~/.config/audax/.env overrides the matching setting (providers.apply_env). Prints one JSON
+in ~/.config/audax/.env overrides the matching setting (providers.apply_env); an AUDAX_PROVIDER
+that switches provider first drops the settings' key, base URL and AWS fields. Prints one JSON
 object on stdout, {"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text,
 and "skipped" means the raw transcript because the clean-up failed. Exit codes: 0 text printed,
 3 nothing usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't open file".

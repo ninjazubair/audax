@@ -53,6 +53,8 @@ FIRST_MODEL = "gpt-6.1-sol"  # the default: top of the list
 ENV_FILE = Path.home() / ".config/audax/.env"  # read on every dictation; AUDAX never writes it
 BEDROCK_URL = "https://bedrock-runtime.{region}.amazonaws.com/model/{model}/converse"
 SECRET_FIELDS = ("api_key", "aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+PROVIDER_FIELDS = SECRET_FIELDS + ("aws_auth", "aws_profile", "base_url", "auth_header",
+                                 "api_version", "region")  # tied to one provider
 GENERIC_ENV = {"AUDAX_PROVIDER": "provider", "AUDAX_MODEL": "model", "AUDAX_BASE_URL": "base_url",
                "AUDAX_API_KEY": "api_key", "AUDAX_AUTH_HEADER": "auth_header",
                "AUDAX_API_VERSION": "api_version"}
@@ -183,7 +185,11 @@ def bedrock_env(env: dict) -> dict:
 
 def apply_env(cfg: dict, env: dict) -> dict:
     """A new dict: cfg with every non-empty recognised .env value laid over it, key by key.
-    The generic AUDAX_* keys first, then the resulting provider's own keys (so those win)."""
+    The generic AUDAX_* keys first, then the resulting provider's own keys (so those win).
+    An AUDAX_PROVIDER that switches provider first drops the settings' PROVIDER_FIELDS, so the
+    old provider's key (or host, or AWS sign-in) is never sent to the new one."""
+    if env.get("AUDAX_PROVIDER") and env["AUDAX_PROVIDER"] != str(cfg.get("provider")):
+        cfg = {k: v for k, v in cfg.items() if k not in PROVIDER_FIELDS}
     out = {**cfg, **env_values(env, GENERIC_ENV)}
     provider = str(out.get("provider"))  # never raises: a dictation must still paste
     if provider == "bedrock":

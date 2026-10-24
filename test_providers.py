@@ -441,6 +441,26 @@ assert providers.apply_env({"provider": "ollama", "model": "m"}, {}) == {"provid
                                                                         "model": "m"}
 for odd in (["x"], None, 5):  # a malformed provider: no override, and no exception
     assert providers.apply_env({"provider": odd}, {"OPENAI_API_KEY": "o"}) == {"provider": odd}
+# A .env that switches provider drops the settings' provider fields: the old key is never sent.
+SETTINGS = {"provider": "claude", "model": "m", "api_key": "sk-ant-SETTINGS", "region": "r",
+            "base_url": "https://old", "auth_header": "bearer", "api_version": "1",
+            "aws_auth": "access_key", "aws_access_key_id": "A", "aws_secret_access_key": "S",
+            "aws_session_token": "T", "aws_profile": "p", "language": "en"}
+assert providers.apply_env(SETTINGS, {"AUDAX_PROVIDER": "ollama"}) == {
+    "provider": "ollama", "model": "m", "language": "en"}
+assert providers.apply_env(SETTINGS, {"AUDAX_PROVIDER": "claude"}) == SETTINGS  # no switch
+saved_post = providers.post_json
+providers.post_json = raising(AssertionError("sent"))  # a request must not even be attempted
+for env, p in (({"AUDAX_PROVIDER": "openai_compatible", "AUDAX_BASE_URL": "https://gw.example/v1",
+                 "ANTHROPIC_API_KEY": "a"}, "openai_compatible"),
+               ({"AUDAX_PROVIDER": "bedrock", "AWS_REGION": "us-east-1"}, "bedrock")):
+    cfg = providers.apply_env(SETTINGS, env)
+    try:
+        providers.complete(cfg["provider"], cfg, "S", "U")
+        raise AssertionError("no error")
+    except ValueError as e:
+        assert str(e) == p + ": api_key is not set", e
+providers.post_json = saved_post
 
 # auth_headers: three styles; empty or unknown gives the provider's default.
 assert providers.auth_headers("bearer", "k") == {"Authorization": "Bearer k"}

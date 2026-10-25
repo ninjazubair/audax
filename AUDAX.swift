@@ -20,6 +20,10 @@ let voiceFloorDB: Float = -50  // loudest tick below this is silence, never tran
 // ponytail: calibration knob, assumed not measured; room noise on a Mac mic is usually
 // -55…-70 dBFS, speech -35…-15. Tune from the peak_db log lines.
 let maxSeconds = 300.0  // the only automatic stop
+// ponytail: calibration knob, not measured. How long the microphone may take to start before
+// the dictation ends with "Microphone did not start". A Bluetooth headset can take a second or
+// two to switch its mic on; a stuck CoreAudio device never does.
+let micStartTimeout = 3.0
 let tick = 0.05
 let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't open file"
 
@@ -183,6 +187,58 @@ final class Chime {
     }
 }
 
+/// Starts the microphone off the main thread. AVAudioRecorder.record() waits for the input
+/// device's first IO cycle; on a stuck CoreAudio device that wait never ends, and on the main
+/// thread it took the hot keys, SIGUSR1 and SIGTERM with it. Here it blocks only `queue`.
+final class Mic {
+    private let queue = DispatchQueue(label: "local.audax.mic")
+    private var started: AVAudioRecorder?  // `queue` only: the last recorder that started
+    private var wrecks: [AVAudioRecorder] = []  // `queue` only: see keepWreck
+
+    /// `done` runs on the main queue with the running recorder, or nil when it did not start.
+    func start(_ done: @escaping (AVAudioRecorder?) -> Void) {
+        queue.async {
+            let format: [String: Any] = [
+                AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
+                AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
+            let began = Date()
+            let rec = try? AVAudioRecorder(url: wavURL, settings: format)
+            let ok = rec?.record() == true
+            let took = Date().timeIntervalSince(began)
+            var running = ok ? rec : nil
+            if let rec = rec, !ok || took >= micStartTimeout {
+                self.keepWreck(rec, ok: ok, took: took)
+                running = nil
+            }
+            running?.isMeteringEnabled = true
+            self.started = running
+            DispatchQueue.main.async { [running] in done(running) }
+        }
+    }
+
+    /// A start that failed or outlasted micStartTimeout leaves its audio queue in a state no
+    /// document describes. Freed after such a start, a recorder crashed AUDAX: its queue still
+    /// delivered input to it (EXC_BAD_ACCESS in AudioRecorderAQInputCallback, stuck CoreAudio,
+    /// 2026-10-25). So it is stopped and kept. ponytail: one recorder leaked per such start.
+    private func keepWreck(_ rec: AVAudioRecorder, ok: Bool, took: Double) {
+        rec.stop()
+        wrecks.append(rec)
+        let entry: [String: Any] = ["warning": "microphone start returned late or failed",
+                                    "record": ok, "ms": Int((took * 1000).rounded())]
+        DispatchQueue.main.async { appendToLog(entry) }
+    }
+
+    /// Every recording ends with this. It stops a recorder whose start returned too late for
+    /// that recording (main stops the one it took). Queued behind that start, it runs before any
+    /// later start, so two recorders never write rec.wav at once.
+    func abandon() {
+        queue.async {
+            if self.started?.isRecording == true { self.started?.stop() }  // main's is stopped
+            self.started = nil
+        }
+    }
+}
+
 /// Bar level for the pill from the recorder's level: tracks the room's noise floor so that only
 /// sound clearly above it moves the bars.
 struct VoiceMeter {
@@ -238,7 +294,9 @@ final class App: NSObject, NSApplicationDelegate {
     var axTrusted = AXIsProcessTrusted()  // Accessibility at the last idle check: a grant renews
     var usr1: DispatchSourceSignal?
     var term: DispatchSourceSignal?
-    var recorder: AVAudioRecorder?
+    let mic = Mic()
+    var recorder: AVAudioRecorder?  // set once the mic has started, for this recording only
+    var recordingID = 0  // beginRecording counts up: a mic start that returns late is stale
     var timer: Timer?
     var target: NSRunningApplication?  // the app that had focus when the shortcut was pressed
     var targetIsSelf = false  // dictating into AUDAX's own window (its "Try it here" box)
@@ -688,6 +746,7 @@ final class App: NSObject, NSApplicationDelegate {
         timer = nil
         recorder?.stop()
         recorder = nil
+        mic.abandon()
         phase = .idle
         hud.hide()
         appendToLog(["cancel": "fn chord"])
@@ -734,6 +793,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard phase == .idle else { return }  // a second press while the mic prompt was open
         self.mode = mode
         phase = .recording
+        recordingID += 1
         elapsed = 0
         peakDB = -160
         stoppedByCap = false
@@ -748,27 +808,46 @@ final class App: NSObject, NSApplicationDelegate {
         // they press. So the last ≈0.15 s of the 0.25 s start glide, already decaying, falls
         // inside the recording window; whether the warm-up skip (the first 0.25 s of readings)
         // keeps it out of the silence check is unmeasured.
+        // The id keeps a start that a quick stop and restart left behind from opening a second
+        // recorder on rec.wav for the next recording.
+        let id = recordingID
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self, self.phase == .recording else { return }
-            self.startRecorder()
+            guard let self = self, self.waitingForMic(id) else { return }
+            self.startRecorder(id)
         }
     }
 
-    func startRecorder() {
-        guard recorder == nil else { return }
-        let format: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
-            AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
-        guard let rec = try? AVAudioRecorder(url: wavURL, settings: format), rec.record() else {
-            phase = .idle
-            hud.hide()
-            return alert("Could not start recording from the microphone.")
+    /// The mic starts on Mic's queue. Its answer, or micStartTimeout, whichever comes first,
+    /// decides; the other finds the recording gone or no longer waiting and does nothing.
+    func startRecorder(_ id: Int) {
+        mic.start { [weak self] rec in self?.recorderStarted(rec, id: id) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + micStartTimeout) { [weak self] in
+            guard let self = self, self.waitingForMic(id) else { return }
+            self.micFailed("microphone did not start within \(micStartTimeout) s")
         }
-        rec.isMeteringEnabled = true
+    }
+
+    func waitingForMic(_ id: Int) -> Bool {
+        id == recordingID && phase == .recording && recorder == nil
+    }
+
+    func recorderStarted(_ rec: AVAudioRecorder?, id: Int) {
+        guard waitingForMic(id) else { return }  // too late: mic.abandon() stops it
+        guard let rec = rec else { return micFailed("microphone did not start") }
         recorder = rec
         timer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
             self?.meter()
         }
+    }
+
+    /// A flash and a log line, never a modal: an alert would hold the hot keys, SIGUSR1 and
+    /// SIGTERM until someone clicks it.
+    func micFailed(_ why: String) {
+        phase = .idle
+        mic.abandon()
+        appendToLog(["warning": why])
+        if settings.sounds { chime.nothing() }
+        hud.flash("Microphone did not start", symbol: "mic.slash", seconds: 2.5)
     }
 
     func meter() {
@@ -791,6 +870,7 @@ final class App: NSObject, NSApplicationDelegate {
         timer = nil
         recorder?.stop()
         recorder = nil
+        mic.abandon()
         var entry: [String: Any] = ["peak_db": Double(peakDB.rounded()),
                                     "ms": Int((elapsed * 1000).rounded())]
         if stoppedByCap { entry["cap"] = true }

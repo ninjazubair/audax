@@ -528,6 +528,12 @@ final class App: NSObject, NSApplicationDelegate {
     /// The provider dictations use (the .env's AUDAX_PROVIDER wins), so probes check that one.
     var activeProvider: String { ProviderInfo.active(settings, env: EnvFile.values()) }
 
+    /// Ollama's model as dictate.py will use it: the .env's AUDAX_MODEL wins over Settings'.
+    var ollamaModel: String {
+        ProviderInfo.effective(settings, id: "ollama", env: EnvFile.values(),
+                               stored: { _ in false })["model"] ?? ""
+    }
+
     /// Accessibility granted since the last check (a tap from before a revoke may still count as
     /// enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil first,
     /// so its deinit removes the old tap before the new one exists. Idle only, so a renewal never
@@ -571,9 +577,9 @@ final class App: NSObject, NSApplicationDelegate {
         return (hiToolbox?.object(forKey: "AppleFnUsageType") as? Int ?? -1) != 0
     }
 
-    /// Ollama is running and has the configured model.
+    /// Ollama is running and has the model dictations use (the .env's AUDAX_MODEL wins).
     func checkOllama() {
-        let name = settings.models["ollama"] ?? ""
+        let name = ollamaModel
         guard let url = URL(string: "http://127.0.0.1:11434/api/tags") else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             let tags = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -1017,7 +1023,7 @@ final class App: NSObject, NSApplicationDelegate {
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
         req.httpBody = try? JSONSerialization.data(
-            withJSONObject: ["model": settings.models["ollama"] ?? "", "keep_alive": "1h"])
+            withJSONObject: ["model": ollamaModel, "keep_alive": "1h"])
         URLSession.shared.dataTask(with: req).resume()  // fire and forget; failure = no clean-up
     }
 

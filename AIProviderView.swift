@@ -177,7 +177,7 @@ struct AIProviderView: View {
     }
 
     var ollamaRow: some View {
-        let name = settings.models["ollama"] ?? ""
+        let name = cfg["model"] ?? ""  // what the probe checks: the .env's AUDAX_MODEL wins
         return LabeledContent("Ollama") {
             HStack(spacing: 8) {
                 StatusText(ok: model.cleanupOK, text: model.cleanupOK ? "Running with \(name)"

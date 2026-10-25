@@ -328,9 +328,12 @@ struct QuickControls: View {
     /// The provider dictations use (the .env's AUDAX_PROVIDER wins), as the privacy line names.
     var providerID: String { ProviderInfo.active(settings, env: EnvFile.values()) }
 
+    /// For the model dictations use: the .env's AUDAX_MODEL wins over Settings'.
     var speedHint: String? {
-        let provider = providerID
-        return Self.speedHints["\(provider)/\(settings.models[provider] ?? "")"]
+        let env = EnvFile.values(), provider = ProviderInfo.active(settings, env: env)
+        let model = ProviderInfo.effective(settings, id: provider, env: env,
+                                           stored: { _ in false })["model"] ?? ""
+        return Self.speedHints["\(provider)/\(model)"]
     }
 
     /// Off counts as local: with clean-up switched off no text is sent anywhere.

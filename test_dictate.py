@@ -415,4 +415,26 @@ assert dictate.apply_subs("abc++ and asp.netcore", EDGE) == "abc++ and asp.netco
 assert dictate.apply_subs("Work-Front, workfronts", {"work front": "Workfront"}) == (
     "Workfront, workfronts")  # normal words as before: [\s-]+ joins, whole words only
 
+# Copilot: the gh token is not in cfg, so providers.complete redacts it itself. A reason
+# phrase that echoes it reaches neither the log nor stdout. No network, no real caches.
+GHO = "gho_ECHOED_TOKEN_123"
+real_host, real_caches = dictate.providers.copilot_api_host, (
+    dictate.providers.HOST_CACHE, dictate.providers.MODELS_CACHE)
+dictate.providers.HOST_CACHE = Path(tempfile.mkdtemp()) / "host.json"  # a 401 marks it stale
+dictate.providers.MODELS_CACHE = Path(tempfile.mkdtemp()) / "models.json"
+dictate.providers.gh_token = lambda: GHO
+dictate.providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
+dictate.providers.post_json = reply_with(urllib.error.HTTPError(
+    "https://api.business.githubcopilot.com/chat/completions", 401, "bad token " + GHO, {},
+    io.BytesIO(b"")))
+dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
+code, printed = run_main({"provider": "copilot", "model": "gpt-4.1"})
+assert code == 0 and json.loads(printed)["cleanup"] == "skipped", printed
+last = json.loads(dictate.LOG.read_text(encoding="utf-8").splitlines()[-1])
+assert "401" in last["error"] and "<redacted>" in last["error"], last
+assert GHO not in printed and GHO not in dictate.LOG.read_text(encoding="utf-8")
+dictate.providers.gh_token, dictate.providers.copilot_api_host = real_gh, real_host
+dictate.providers.HOST_CACHE, dictate.providers.MODELS_CACHE = real_caches
+dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
+
 print("ok")

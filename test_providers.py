@@ -356,17 +356,33 @@ def http_error(code):
 
 
 # A 401/403/404 from Copilot (e.g. gh switched account) marks the cached host stale; others don't.
+# Any Copilot failure after the token is read comes back as a RuntimeError, token redacted.
 for code, stale in ((403, True), (401, True), (404, True), (500, False)):
     providers.write_host_cache(providers.HOST_CACHE, BIZ)
     providers.post_json = http_error(code)
     try:
         providers.complete("copilot", {"model": "m"}, "S", "U")
         assert False
-    except urllib.error.HTTPError as e:
-        assert e.code == code
+    except RuntimeError as e:
+        assert str(code) in str(e), (code, e)
     saved = json.loads(providers.HOST_CACHE.read_text())
     assert saved["api"] == BIZ, (code, saved)
     assert saved["at"] == 0 if stale else saved["at"] > 0, (code, saved)
+for echo in (urllib.error.HTTPError(BIZ + "/chat/completions", 401, "bad gho_t", {},
+                                    io.BytesIO(b"")), OSError("refused for gho_t")):
+    providers.post_json = raising(echo)  # the server (or a proxy) quotes the token
+    try:
+        providers.complete("copilot", {"model": "m"}, "S", "U")
+        assert False
+    except RuntimeError as e:
+        assert "gho_t" not in repr(e) and "<redacted>" in repr(e), repr(e)
+providers.copilot_api_host = raising(OSError("host lookup quoted gho_t"))  # the GET in flight
+try:
+    providers.complete("copilot", {"model": "m"}, "S", "U")
+    assert False
+except RuntimeError as e:
+    assert "gho_t" not in repr(e) and "host lookup" in repr(e), repr(e)
+providers.copilot_api_host = lambda token: "https://api.business.githubcopilot.com"
 
 # 0.4.0: Amazon Bedrock, Microsoft Foundry, OpenAI- and Anthropic-compatible gateways, and the
 # ~/.config/audax/.env file that overrides the app's settings.

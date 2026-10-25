@@ -582,14 +582,21 @@ def responses_request(cfg: dict, system: str, user: str) -> tuple:
     return cfg["_host"] + "/responses", headers, body
 
 
-def with_copilot_auth(cfg: dict) -> dict:
-    """A copy of cfg with the GitHub token, the plan's host and the cached model list (for the
-    route), at any age; [] without one. Never fetches the list: a dictation must not wait for
-    it; the CLI (run by the app's Settings) refreshes it. The caller's dict is untouched."""
+def copilot_token() -> str:
+    """The gh token, or RuntimeError (our own words, no token in them) when not signed in."""
     token = gh_token()
     if not token:
         raise RuntimeError("copilot: not signed in - run: "
                            "gh auth login --hostname github.com --web --git-protocol https")
+    return token
+
+
+def with_copilot_auth(cfg: dict, token: str = "") -> dict:
+    """A copy of cfg with the GitHub token (copilot_token's unless given), the plan's host and
+    the cached model list (for the route), at any age; [] without one. Never fetches the list: a
+    dictation must not wait for it; the CLI (run by the app's Settings) refreshes it. The
+    caller's dict is untouched."""
+    token = token or copilot_token()
     host = copilot_api_host(token)
     models = read_models_cache(MODELS_CACHE)[1] or []
     return {**cfg, "_token": token, "_host": host, "_models": models}
@@ -615,9 +622,22 @@ BUILDERS = {"ollama": ollama_request, "openai": openai_request, "claude": claude
 
 
 def complete(provider: str, cfg: dict, system: str, user: str, timeout: float = 20) -> str:
-    """The model's answer as text. Raises on any failure; dictate.cleanup decides what then."""
-    if provider == "copilot":
-        cfg = with_copilot_auth(cfg)
+    """The model's answer as text. Raises on any failure; dictate.cleanup decides what then.
+
+    Copilot: the gh token is not in cfg, so the caller's redaction cannot see it. Any failure
+    once it is read (host lookup, request, reply) is raised again as a RuntimeError of its repr
+    with the token redacted: a server can echo it in a reason phrase."""
+    if provider != "copilot":
+        return send(provider, cfg, system, user, timeout)
+    token = copilot_token()
+    try:
+        return send(provider, with_copilot_auth(cfg, token), system, user, timeout)
+    except Exception as e:
+        raise RuntimeError(redact(repr(e), {"api_key": token})) from None
+
+
+def send(provider: str, cfg: dict, system: str, user: str, timeout: float) -> str:
+    """One request to provider's builder URL, its reply as text."""
     url, headers, body = BUILDERS[provider](cfg, system, user)
     try:
         resp = post_json(url, headers, body, timeout)

@@ -12,8 +12,8 @@ New ids:
 | --- | --- | --- | --- |
 | `bedrock` | Amazon Bedrock | Converse API: `POST https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/converse` | Bedrock API key (`Authorization: Bearer`), or SigV4 with an access key/secret (+ session token), or an AWS profile from `~/.aws/credentials` + `~/.aws/config` |
 | `foundry` | Microsoft Foundry | OpenAI-compatible chat completions at `{base_url}/chat/completions[?api-version=…]` (e.g. `https://<resource>.openai.azure.com/openai/v1`) | header `api-key: <key>` by default |
-| `openai_compatible` | Other (OpenAI-compatible) | `{base_url}/chat/completions[?api-version=…]` | `Authorization: Bearer` by default |
-| `anthropic_compatible` | Other (Anthropic-compatible) | `{base_url}/v1/messages`, `anthropic-version: 2023-06-01` (e.g. Claude on Foundry `https://<resource>.services.ai.azure.com/anthropic`) | `x-api-key` by default |
+| `openai_compatible` | Other (OpenAI-compatible) | `{base_url}/chat/completions[?api-version=…]` | `Authorization: Bearer` by default; key from Settings or `AUDAX_API_KEY`, never `OPENAI_API_KEY` |
+| `anthropic_compatible` | Other (Anthropic-compatible) | `{base_url}/v1/messages`, `anthropic-version: 2023-06-01` (e.g. Claude on Foundry `https://<resource>.services.ai.azure.com/anthropic`) | `x-api-key` by default; key from Settings or `AUDAX_API_KEY`, never `ANTHROPIC_API_KEY` |
 
 - Header style is configurable for the three key-based new providers: `bearer` | `api-key` |
   `x-api-key`. Optional `api_version` adds `?api-version=…`.
@@ -54,8 +54,13 @@ New ids:
    `AUDAX_API_VERSION`, `AWS_REGION` / `AWS_DEFAULT_REGION`, `AWS_BEARER_TOKEN_BEDROCK`,
    `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`,
    `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_API_VERSION`, `OPENAI_API_KEY`,
-   `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`. Provider-specific keys apply only
-   to their provider (e.g. `AZURE_*` to `foundry`, `AWS_*` to `bedrock`).
+   `ANTHROPIC_API_KEY`. Provider-specific keys apply only to their provider (`AZURE_*` to
+   `foundry`, `AWS_*` to `bedrock`).
+   - **Vendor keys go only to their vendor** (owner ruling, 2026-10-25): `OPENAI_API_KEY` applies
+     to `openai` only and `ANTHROPIC_API_KEY` to `claude` only. `openai_compatible` and
+     `anthropic_compatible` take their key from Settings or `AUDAX_API_KEY` and their base URL
+     from Settings or `AUDAX_BASE_URL`; `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are not
+     recognised. (Until then a `.env` `OPENAI_API_KEY` reached any OpenAI-compatible gateway.)
    - Settings shows "Provider and values come from ~/.config/audax/.env" when `AUDAX_PROVIDER` is
      set there, and a warning when the file is readable by group or others ("chmod 600").
    - "Open .env file" creates the file with a commented template (mode 0600) only if it does not

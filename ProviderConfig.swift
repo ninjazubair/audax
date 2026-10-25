@@ -330,14 +330,13 @@ enum EnvFile {
                           ("AUDAX_BASE_URL", "base_url"), ("AUDAX_API_KEY", "api_key"),
                           ("AUDAX_AUTH_HEADER", "auth_header"),
                           ("AUDAX_API_VERSION", "api_version")]
+    /// providers.PROVIDER_ENV. A vendor's key goes only to that vendor: the two compatible
+    /// gateways take AUDAX_API_KEY and AUDAX_BASE_URL only (2026-10-25 ruling).
     static let perProvider: [String: [(String, String)]] = [
         "foundry": [("AZURE_OPENAI_ENDPOINT", "base_url"), ("AZURE_OPENAI_API_KEY", "api_key"),
                     ("AZURE_OPENAI_API_VERSION", "api_version")],
         "openai": [("OPENAI_API_KEY", "api_key")],
-        "openai_compatible": [("OPENAI_API_KEY", "api_key"), ("OPENAI_BASE_URL", "base_url")],
         "claude": [("ANTHROPIC_API_KEY", "api_key")],
-        "anthropic_compatible": [("ANTHROPIC_API_KEY", "api_key"),
-                                 ("ANTHROPIC_BASE_URL", "base_url")],
         "bedrock": [("AWS_DEFAULT_REGION", "region"), ("AWS_REGION", "region")],  // AWS_REGION wins
     ]
     static let awsKeys = [("AWS_ACCESS_KEY_ID", "aws_access_key_id"),
@@ -427,6 +426,7 @@ enum EnvFile {
         # anthropic_compatible.
         # AUDAX_PROVIDER=bedrock
         # AUDAX_MODEL=
+        # Base URL and key for the two compatible providers (or any provider's key):
         # AUDAX_BASE_URL=
         # AUDAX_API_KEY=
         # Header style for foundry and the two compatible providers: bearer, api-key, x-api-key.
@@ -446,13 +446,11 @@ enum EnvFile {
         # AZURE_OPENAI_API_KEY=
         # AZURE_OPENAI_API_VERSION=
 
-        # OpenAI API and OpenAI-compatible gateways
+        # OpenAI API only: this key is never sent to another provider.
         # OPENAI_API_KEY=
-        # OPENAI_BASE_URL=
 
-        # Claude API and Anthropic-compatible gateways
+        # Claude API only: this key is never sent to another provider.
         # ANTHROPIC_API_KEY=
-        # ANTHROPIC_BASE_URL=
 
         """
 }

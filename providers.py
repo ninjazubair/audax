@@ -71,13 +71,14 @@ PROVIDER_FIELDS = SECRET_FIELDS + ("aws_auth", "aws_profile", "base_url", "auth_
 GENERIC_ENV = {"AUDAX_PROVIDER": "provider", "AUDAX_MODEL": "model", "AUDAX_BASE_URL": "base_url",
                "AUDAX_API_KEY": "api_key", "AUDAX_AUTH_HEADER": "auth_header",
                "AUDAX_API_VERSION": "api_version"}
-PROVIDER_ENV = {  # applied after GENERIC_ENV, for the resulting provider only (bedrock: own code)
+# Applied after GENERIC_ENV, for the resulting provider only (bedrock: own code). A vendor's key
+# goes only to that vendor: the two *_compatible gateways take AUDAX_API_KEY and AUDAX_BASE_URL,
+# never OPENAI_* or ANTHROPIC_* (2026-10-25 ruling).
+PROVIDER_ENV = {
     "foundry": {"AZURE_OPENAI_ENDPOINT": "base_url", "AZURE_OPENAI_API_KEY": "api_key",
                 "AZURE_OPENAI_API_VERSION": "api_version"},
     "openai": {"OPENAI_API_KEY": "api_key"},
-    "openai_compatible": {"OPENAI_API_KEY": "api_key", "OPENAI_BASE_URL": "base_url"},
     "claude": {"ANTHROPIC_API_KEY": "api_key"},
-    "anthropic_compatible": {"ANTHROPIC_API_KEY": "api_key", "ANTHROPIC_BASE_URL": "base_url"},
 }
 AWS_KEYS_ENV = {"AWS_ACCESS_KEY_ID": "aws_access_key_id",
                 "AWS_SECRET_ACCESS_KEY": "aws_secret_access_key",

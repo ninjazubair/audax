@@ -182,7 +182,7 @@ assert '"raw": "der Käse ist gut"' in dictate.LOG.read_text(encoding="utf-8")
 # reaches the request header and nothing else (not stdout, the log or the environment).
 dictate.providers.ENV_FILE.write_text(
     "# gateway\nAUDAX_PROVIDER=openai_compatible\nAUDAX_BASE_URL=https://gw.example/v1\n"
-    "export AUDAX_MODEL='gw-model'\nOPENAI_API_KEY=" + SECRET + "\n")
+    "export AUDAX_MODEL='gw-model'\nAUDAX_API_KEY=" + SECRET + "\n")  # a gateway's own key name
 environ = dict(os.environ)
 dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
 seen = []

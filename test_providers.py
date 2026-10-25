@@ -467,18 +467,24 @@ assert providers.apply_env({"provider": "foundry"}, {"AUDAX_API_KEY": "generic"}
 assert providers.apply_env({"provider": "openai"}, {
     "OPENAI_API_KEY": "o", "OPENAI_BASE_URL": "https://gw/v1"}) == {"provider": "openai",
                                                                      "api_key": "o"}
-assert providers.apply_env({}, {
-    "AUDAX_PROVIDER": "openai_compatible", "OPENAI_API_KEY": "o",
-    "OPENAI_BASE_URL": "https://gw/v1", "AUDAX_AUTH_HEADER": "x-api-key",
-    "AUDAX_API_VERSION": "v1"}) == {
-    "provider": "openai_compatible", "api_key": "o", "base_url": "https://gw/v1",
-    "auth_header": "x-api-key", "api_version": "v1"}
-assert providers.apply_env({"provider": "claude"}, {
-    "ANTHROPIC_API_KEY": "a", "ANTHROPIC_BASE_URL": "https://gw"}) == {"provider": "claude",
-                                                                        "api_key": "a"}
-assert providers.apply_env({"provider": "anthropic_compatible"}, {
-    "ANTHROPIC_API_KEY": "a", "ANTHROPIC_BASE_URL": "https://gw"}) == {
-    "provider": "anthropic_compatible", "api_key": "a", "base_url": "https://gw"}
+# Vendor keys go only to their vendor (2026-10-25 ruling): OPENAI_API_KEY to openai,
+# ANTHROPIC_API_KEY to claude. The compatible gateways take AUDAX_API_KEY and AUDAX_BASE_URL;
+# OPENAI_BASE_URL and ANTHROPIC_BASE_URL apply to no provider.
+VENDOR = {"OPENAI_API_KEY": "o", "OPENAI_BASE_URL": "https://gw/v1", "ANTHROPIC_API_KEY": "a",
+          "ANTHROPIC_BASE_URL": "https://gw"}
+for p in ("openai_compatible", "anthropic_compatible"):
+    gw_settings = {"provider": p, "api_key": "gw-key", "base_url": "https://mine/v1"}
+    assert providers.apply_env(gw_settings, VENDOR) == gw_settings, p
+    assert providers.apply_env({}, {**VENDOR, "AUDAX_PROVIDER": p}) == {"provider": p}, p
+    assert providers.apply_env({}, {
+        **VENDOR, "AUDAX_PROVIDER": p, "AUDAX_API_KEY": "g", "AUDAX_BASE_URL": "https://gw2/v1",
+        "AUDAX_AUTH_HEADER": "x-api-key", "AUDAX_API_VERSION": "v1"}) == {
+        "provider": p, "api_key": "g", "base_url": "https://gw2/v1", "auth_header": "x-api-key",
+        "api_version": "v1"}, p
+assert providers.apply_env({"provider": "claude"}, VENDOR) == {"provider": "claude",
+                                                               "api_key": "a"}
+assert providers.apply_env({"provider": "openai"}, VENDOR) == {"provider": "openai",
+                                                               "api_key": "o"}
 assert providers.apply_env({"provider": "ollama", "model": "m"}, {}) == {"provider": "ollama",
                                                                         "model": "m"}
 for odd in (["x"], None, 5):  # a malformed provider: no override, and no exception

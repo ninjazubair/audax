@@ -377,6 +377,34 @@ assert dictate.read_config(io.StringIO(DEEP)) == dictate.DEFAULT_CONFIG
 Peer.raw = answer(DEEP.encode())
 assert dictate.transcribe(wav, [], "en", server_url=PEER + "/inference") == ("fallback text",
                                                                             "cli")
+
+# whisper-server is loopback only: a redirect is refused, never followed, and falls back.
+for status in (b"301 Moved Permanently", b"302 Found", b"303 See Other",
+               b"307 Temporary Redirect", b"308 Permanent Redirect"):
+    Peer.raw, Peer.paths = answer(b"", status, b"Location: %s/elsewhere\r\n" % PEER.encode()), []
+    assert dictate.transcribe(wav, [], "en", server_url=PEER + "/inference") == (
+        "fallback text", "cli"), status
+    assert Peer.paths == ["/inference"], (status, Peer.paths)  # /elsewhere never asked
+
+# Overall deadlines: a peer that sends one byte every 0.5 s never trips a per-read socket
+# timeout. transcribe_server's timeout and CLEANUP_SECONDS bound the whole call.
+assert dictate.CLEANUP_SECONDS == 20
+Peer.raw, Peer.slow = b"", b"HTTP/1.1 200 OK\r\n"  # even the status line, byte by byte
+t0 = time.monotonic()
+try:
+    dictate.transcribe_server(wav, [], "en", url=PEER + "/inference", timeout=1)
+    raise AssertionError("no timeout")
+except socket.timeout:
+    pass
+assert time.monotonic() - t0 < 2.5, time.monotonic() - t0
+Peer.raw, Peer.slow = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", b'{"message": {}}'
+dictate.CLEANUP_SECONDS = 1
+t0 = time.monotonic()  # the real path: cleanup, providers.complete, post_json, urlopen
+got = dictate.cleanup("um hello", {**dictate.DEFAULT_CONFIG, "url": PEER + "/api/chat"})
+assert got[:2] == ("um hello", "skipped") and "timeout" in got[2], got
+assert time.monotonic() - t0 < 2.5, time.monotonic() - t0
+dictate.CLEANUP_SECONDS = 20
+Peer.slow = b""
 dictate.transcribe_cli = real_cli
 
 print("ok")

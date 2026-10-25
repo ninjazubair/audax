@@ -30,9 +30,12 @@ can merge into it.
 import http.client
 import json
 import re
+import socket
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
@@ -56,6 +59,7 @@ STATE = Path.home() / ".cache/mac-dictation"
 WHISPER_MODEL = STATE / "models/ggml-large-v3-turbo-q5_0.bin"
 LOG = STATE / "dictation.log"
 USER_SUBS = STATE / "word_subs.json"  # the user's own corrections, edited in Settings
+CLEANUP_SECONDS = 20  # the whole clean-up call; providers' own 20 s bounds each read only
 
 CLEANUP_PROMPT = (
     "You clean up dictated text. The text is in {lang}; keep it in {lang} and never translate. "
@@ -170,17 +174,52 @@ def multipart(fields: dict, file_field: str, filename: str, data: bytes) -> tupl
     return "multipart/form-data; boundary=" + boundary, body
 
 
+def within(seconds: float, call):
+    """call(), or socket.timeout once `seconds` have passed, however slowly a peer sends: a
+    socket timeout bounds each read, never the whole exchange. ponytail: the call left behind
+    runs on in a daemon thread until dictate.py exits, which it does right after a dictation."""
+    box = {}
+
+    def run():
+        try:
+            box["value"] = call()
+        except BaseException as e:  # raised again below, in the caller's thread
+            box["error"] = e
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise socket.timeout(f"no answer within {seconds:g} s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """whisper-server is loopback only: a redirect from whatever answers there is refused."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
 def transcribe_server(wav: Path, vocab: list, language: str, url: str,
                       timeout: float = 60) -> str:
-    """The transcript from the app's resident whisper-server: no model load per call."""
+    """The transcript from the app's resident whisper-server: no model load per call. timeout
+    bounds the whole request, connect to last byte."""
     fields = {"temperature": "0", "response_format": "json", "language": language}
     if vocab:
         fields["prompt"] = ", ".join(vocab)
     content_type, body = multipart(fields, "file", wav.name, wav.read_bytes())
     req = urllib.request.Request(url, body, {"Content-Type": content_type})
-    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback: no proxy
-    with direct.open(req, timeout=timeout) as resp:
-        reply = json.load(resp)
+    # Loopback: no proxy, no redirect.
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+
+    def fetch():
+        with direct.open(req, timeout=timeout) as resp:
+            return json.load(resp)
+
+    reply = within(timeout, fetch)
     text = reply["text"] if isinstance(reply, dict) else None
     if not isinstance(text, str):  # null, a number, a JSON list...
         raise ValueError("whisper-server: no text")
@@ -241,16 +280,17 @@ def cleanup(text: str, cfg: dict) -> tuple:
 
     "skipped" gives back the input text, in two cases: the model call or its reply failed with
     one of CLEANUP_ERRORS (network, HTTP status, bad JSON, a reply of the wrong shape, no GitHub
-    sign-in; error = repr of the exception with every secret field of cfg redacted, since a
-    server can echo the key in its reason phrase; the GitHub token is kept out by
-    providers.gh_token), or reject_reason
-    refused the answer (error = "rejected: ..."). Any other exception propagates to main: exit 1.
+    sign-in, no answer within CLEANUP_SECONDS; error = repr of the exception with every secret
+    field of cfg redacted, since a server can echo the key in its reason phrase; the GitHub
+    token is kept out by providers.gh_token), or reject_reason refused the answer
+    (error = "rejected: ..."). Any other exception propagates to main: exit 1.
     """
     if cfg["cleanup"] == "off" or not has_words(text):
         return text, "off", None
     system = prompt_for(cfg["language"], cfg["cleanup"])
+    user = f"<dictation>{text}</dictation>"
     try:
-        out = ask_model(cfg, system, f"<dictation>{text}</dictation>")
+        out = within(CLEANUP_SECONDS, lambda: ask_model(cfg, system, user))
         cleaned = out.replace("<dictation>", "").replace("</dictation>", "").strip()
     except CLEANUP_ERRORS as e:
         return text, "skipped", providers.redact(repr(e), cfg)[:200]

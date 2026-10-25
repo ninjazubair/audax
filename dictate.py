@@ -3,7 +3,11 @@
 
 Called by AUDAX.app as: python3 -B dictate.py <recording.wav>, with one JSON object of settings
 on stdin: {"provider", "model", "language", "cleanup": "full"|"light"|"off", "api_key",
-"whisper_path"} (see DEFAULT_CONFIG; never logged, it can carry an API key). Prints one JSON
+"whisper_path"} (see DEFAULT_CONFIG) plus, for the 0.4.0 providers, "base_url", "auth_header",
+"api_version", "region", "aws_auth", "aws_access_key_id", "aws_secret_access_key",
+"aws_session_token" and "aws_profile" (never logged, it can carry secrets). Any non-empty value
+in ~/.config/audax/.env overrides the matching setting (providers.apply_env); an AUDAX_PROVIDER
+that switches provider first drops the settings' key, base URL and AWS fields. Prints one JSON
 object on stdout, {"text", "cleanup": "ok"|"skipped"|"off", "error"}; the app pastes the text,
 and "skipped" means the raw transcript because the clean-up failed. Exit codes: 0 text printed,
 3 nothing usable heard, 1 error (details in the log). Not 2: python uses 2 for "can't open file".
@@ -17,7 +21,8 @@ which one ran ("server" or "cli").
 
 Clean-up providers (providers.py): "ollama" (local Ollama, the default), "copilot" (GitHub
 Copilot, token from the GitHub CLI), "claude" (Anthropic) and "openai" (OpenAI), the last two
-with a key from the Keychain. Local by default; remote providers are opt-in. Audio never
+with a key from the Keychain, and "bedrock", "foundry", "openai_compatible" and
+"anthropic_compatible". Local by default; remote providers are opt-in. Audio never
 leaves the machine (whisper.cpp on the Apple GPU); a remote provider gets only the transcript.
 Setting names follow Jason Ko's Windows tool (whisper-voice-dictation config.py) so this
 can merge into it.
@@ -253,6 +258,8 @@ def cleanup(text: str, cfg: dict) -> tuple:
 
 
 def process(wav: Path, cfg: dict) -> dict:
+    # ~/.config/audax/.env wins over the app's settings, key by key; read on every dictation.
+    cfg = providers.apply_env(cfg, providers.load_env_file(providers.ENV_FILE))
     subs = load_subs()
     t0 = time.time()
     url = WHISPER_SERVER + cfg["whisper_path"] + "/inference"

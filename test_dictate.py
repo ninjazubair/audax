@@ -5,6 +5,7 @@ import http.client
 import http.server
 import io
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -16,6 +17,7 @@ import dictate
 
 dictate.LOG = Path(tempfile.mkdtemp()) / "test.log"  # keep the real log clean
 dictate.USER_SUBS = Path(tempfile.mkdtemp()) / "word_subs.json"  # never the user's real file
+dictate.providers.ENV_FILE = Path(tempfile.mkdtemp()) / ".env"  # never the user's real .env
 
 assert dictate.apply_subs("Check Work Front and real time CDP", {
     "work front": "Workfront", "real time cdp": "RTCDP"}) == "Check Workfront and RTCDP"
@@ -174,6 +176,41 @@ with contextlib.redirect_stdout(out):
     assert dictate.main(["x.wav"]) == 0
 assert '"text": "der Käse ist gut"' in out.getvalue()
 assert '"raw": "der Käse ist gut"' in dictate.LOG.read_text(encoding="utf-8")
+
+# ~/.config/audax/.env overrides the app's settings for each dictation, key by key; its key
+# reaches the request header and nothing else (not stdout, the log or the environment).
+dictate.providers.ENV_FILE.write_text(
+    "# gateway\nAUDAX_PROVIDER=openai_compatible\nAUDAX_BASE_URL=https://gw.example/v1\n"
+    "export AUDAX_MODEL='gw-model'\nOPENAI_API_KEY=" + SECRET + "\n")
+environ = dict(os.environ)
+dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
+seen = []
+
+
+def gateway(reply):
+    def post(url, headers, body, timeout):
+        seen.append((url, headers.get("Authorization"), body["model"]))
+        return reply_with(reply)(url, headers, body, timeout)
+    return post
+
+
+for reply, status in (({"choices": [{"message": {"content": "So send the update."}}]}, "ok"),
+                      (urllib.error.HTTPError("https://gw.example/v1/chat/completions", 401,
+                                              "Unauthorized", {}, io.BytesIO(b"")), "skipped")):
+    dictate.providers.post_json = gateway(reply)
+    sys.stdin = io.StringIO(json.dumps({"provider": "ollama", "model": "gemma4", "api_key": ""}))
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert dictate.main(["x.wav"]) == 0
+    assert json.loads(out.getvalue())["cleanup"] == status, out.getvalue()
+    last = json.loads(dictate.LOG.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["provider"] == "openai_compatible", last  # the log names the provider used
+    assert SECRET not in out.getvalue() and SECRET not in dictate.LOG.read_text()
+assert json.loads(out.getvalue())["text"] == "um so send the update"
+assert "401" in last["error"]
+assert seen == [("https://gw.example/v1/chat/completions", "Bearer " + SECRET, "gw-model")] * 2
+assert dict(os.environ) == environ
+dictate.providers.ENV_FILE = Path(tempfile.mkdtemp()) / ".env"
 dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
 
 ct, body = dictate.multipart({"temperature": "0", "language": "de"}, "file", "rec.wav", b"RIFF....")

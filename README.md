@@ -25,28 +25,39 @@ optional clean-up step fixes punctuation, filler words and grammar.
 | Hands-free | Hold Fn, tap **Space** to lock, release; press **Fn Space** to finish |
 | Cancel | Press any other key while holding Fn |
 
-Both shortcuts can be changed in **Settings** (⌘,): click the field and press the keys.
+AUDAX has one window with a sidebar:
 
-Settings also has:
-
-- **Language**: English or German.
-- **Clean-up**: Off, Light (punctuation, fillers, self-corrections) or Full (also grammar).
-- **Provider** for the clean-up step: Local Ollama (default; text stays on the Mac), GitHub
-  Copilot (uses your existing Copilot seat through the GitHub CLI; pick any model your seat
-  offers), Claude API or OpenAI API (API key stored in the macOS Keychain).
+- **Home**: live state, your shortcuts, a Try-it box, and only the setup items that need you.
+- **History**: every dictation, searchable, with Copy (also logged as JSON lines in
+  `~/.cache/mac-dictation/dictation.log`).
+- **Dictation** (⌘,): change either shortcut (click the field, press the keys), sounds,
+  language (English or German), clean-up level (Off, Light or Full; Full also fixes grammar).
+- **AI Provider**: the clean-up step's provider — Local Ollama (default; text stays on the
+  Mac), GitHub Copilot (your existing seat through the GitHub CLI; pick any model your seat
+  offers), Claude API, OpenAI API, Amazon Bedrock (API key, access key or AWS profile),
+  Microsoft Foundry, or any OpenAI- or Anthropic-compatible gateway. Keys are stored in the
+  macOS Keychain; **Test connection** sends one tiny request.
 - **Words**: your own corrections (misspelled → correct), applied to every dictation.
 
-Every dictation is listed in the main window with a Copy button, and logged as JSON lines in
-`~/.cache/mac-dictation/dictation.log`.
+### Optional `.env` file
+
+Power users and IT can set the provider in `~/.config/audax/.env` (AI Provider → Open .env file
+creates a commented template). Values there override Settings, key by key: `AUDAX_PROVIDER`,
+`AUDAX_MODEL`, `AUDAX_BASE_URL`, `AUDAX_API_KEY`, `AUDAX_AUTH_HEADER`, `AUDAX_API_VERSION`,
+`AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_API_KEY` /
+`AZURE_OPENAI_API_VERSION`. `OPENAI_API_KEY` is used only for OpenAI and `ANTHROPIC_API_KEY`
+only for Claude; gateways take `AUDAX_API_KEY`. Keep the file private (`chmod 600`); AUDAX
+warns when it is not and never edits it.
 
 Measured on the developer's Apple Silicon Mac: speech recognition about 0.15 s; clean-up about
 0.3 s with local Ollama, 2–5 s with a cloud model (Copilot gpt-4.1 ≈2 s, gpt-6.1-sol 2.7–4.9 s).
 
 ## Privacy
 
-Audio never leaves the Mac. With Local Ollama, the text doesn't either. With Copilot, Claude or
-OpenAI selected, the transcribed text is sent to that provider for clean-up; the window footer
-says so. If a provider fails, AUDAX pastes the raw transcript and says "Pasted without
+Audio never leaves the Mac. With Local Ollama, the text doesn't either. With any other provider
+selected, the transcribed text is sent to that provider for clean-up; AUDAX says where. API
+keys and tokens are never written to the log. If a provider fails, AUDAX pastes the raw transcript and says "Pasted without
 clean-up".
 
 ## Build from source

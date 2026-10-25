@@ -4,6 +4,41 @@ All notable changes to AUDAX. Versions follow [Semantic Versioning](https://semv
 single source of the version is the `VERSION` file. Each release has a git tag `vX.Y.Z` and a
 self-signed DMG attached to the GitHub release.
 
+## [0.4.0] — 2026-10-25
+
+### Added
+
+- New window: one sidebar window with Home, History, Dictation, AI Provider, Words and About.
+  Settings live in the same window (⌘, opens Dictation).
+- Home shows the live state, your shortcuts as keycaps, the Try-it box, only the setup items that
+  need attention, and quick switches for language, clean-up level and provider.
+- History: search, "Copy original", provider and timing for each dictation.
+- New recording pill: live waveform, Hold / Hands-free label, timer, clear result messages.
+- More clean-up providers: **Amazon Bedrock** (Bedrock API key, access key or AWS profile),
+  **Microsoft Foundry**, and any **OpenAI-compatible** or **Anthropic-compatible** gateway.
+- AI Provider screen: Advanced settings (endpoint, header style, API version, region, sign-in
+  method), API keys saved in the macOS Keychain, **Test connection**.
+- Optional `~/.config/audax/.env` file for provider settings; values there override Settings.
+  AUDAX warns when the file can be read by other users and never edits an existing file.
+- Soft pitch-glide sounds: up when listening starts, down when it ends, lower when nothing was
+  heard. No extra sound after pasting.
+
+### Changed
+
+- Vendor keys go only to their vendor: `OPENAI_API_KEY` is used for OpenAI, `ANTHROPIC_API_KEY`
+  for Claude; gateways use `AUDAX_API_KEY`.
+- App Nap is off for AUDAX, so the shortcut responds at once even after the app sat idle.
+
+### Fixed
+
+- A stuck macOS audio output or microphone no longer freezes or crashes AUDAX (sounds play
+  through NSSound; the microphone starts off the main thread). 0.3.x could crash here.
+- A reply containing unusual characters (lone surrogates) no longer crashes a dictation.
+- API keys and the GitHub token are removed from any error text before it is logged.
+- Slow or misbehaving servers can no longer hold a dictation open indefinitely (overall time
+  limits, no redirects, a 450 s watchdog that also stops leftover helper processes).
+- Word corrections now match entries that start or end with a symbol (for example `c++`).
+
 ## [0.3.1] — 2026-10-24
 
 ### Added
@@ -80,6 +115,7 @@ self-signed DMG attached to the GitHub release.
 - First version: menu-bar dictation with ⌃⌥D, local whisper.cpp (large-v3-turbo) speech
   recognition, local Ollama clean-up, a transcript list with Copy, JSON-lines log.
 
+[0.4.0]: https://github.com/zuhussai_adobe/audax/releases/tag/v0.4.0
 [0.3.1]: https://github.com/zuhussai_adobe/audax/releases/tag/v0.3.1
 [0.3.0]: https://github.com/zuhussai_adobe/audax/releases/tag/v0.3.0
 [0.2.1]: https://github.com/zuhussai_adobe/audax/releases/tag/v0.2.1

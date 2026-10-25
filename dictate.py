@@ -277,11 +277,17 @@ def process(wav: Path, cfg: dict) -> dict:
             "lang": cfg["language"], "provider": cfg["provider"], "level": cfg["cleanup"]}
 
 
+def utf8_safe(text: str) -> str:
+    """text with every lone surrogate (valid JSON "\\ud800" from a server) as "?": a str that
+    UTF-8 can always encode, so a log or stdout write never costs a dictation."""
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def log(entry: dict) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     with LOG.open("a", encoding="utf-8") as f:  # the app reads the log as UTF-8
         line = {"at": time.strftime("%Y-%m-%d %H:%M:%S"), **entry}
-        f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        f.write(utf8_safe(json.dumps(line, ensure_ascii=False)) + "\n")
 
 
 def main(argv: list) -> int:
@@ -297,8 +303,8 @@ def main(argv: list) -> int:
     log(result)
     if not has_words(result["final"]):
         return 3
-    print(json.dumps({"text": result["final"], "cleanup": result["cleanup"],
-                      "error": result["error"]}, ensure_ascii=False), end="")
+    print(utf8_safe(json.dumps({"text": result["final"], "cleanup": result["cleanup"],
+                                "error": result["error"]}, ensure_ascii=False)), end="")
     return 0
 
 

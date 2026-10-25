@@ -289,4 +289,31 @@ with contextlib.redirect_stderr(err):
 assert err.getvalue().startswith("usage:")
 assert dictate.main(["/nonexistent.wav"]) == 1  # whisper fails: error, not a crash
 
+
+def run_main(stdin_json):
+    """main(["x.wav"]) with these settings on stdin: (exit code, what it printed)."""
+    sys.stdin = io.StringIO(json.dumps(stdin_json))
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        code = dictate.main(["x.wav"])
+    return code, printed.getvalue()
+
+
+# A lone surrogate (valid JSON "\ud800" from a whisper-server or a model) never costs the
+# dictation: the log and stdout get "?" for it, the text is pasted, exit 0.
+LONE = json.loads('"ok \\ud800 there"')
+dictate.log({"final": LONE})  # raised UnicodeEncodeError
+assert '"final": "ok ? there"' in dictate.LOG.read_text(encoding="utf-8")
+dictate.transcribe = lambda wav, vocab, language, url: (LONE, "server")
+code, printed = run_main({"cleanup": "off"})
+assert code == 0 and json.loads(printed)["text"] == "ok ? there", (code, printed)
+printed.encode("utf-8")  # strict: what the app reads as UTF-8
+dictate.transcribe = lambda wav, vocab, language, url: ("send it now", "cli")
+dictate.ask_model = lambda cfg, system, user: json.loads('"Send it \\udfff now."')  # the model
+code, printed = run_main({"cleanup": "light"})
+assert code == 0 and json.loads(printed) == {"text": "Send it ? now.", "cleanup": "ok",
+                                             "error": None}, printed
+dictate.LOG.read_text(encoding="utf-8")  # every line still strict UTF-8
+dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
+
 print("ok")

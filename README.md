@@ -57,8 +57,8 @@ Measured on the developer's Apple Silicon Mac: speech recognition about 0.15 s; 
 
 Audio never leaves the Mac. With Local Ollama, the text doesn't either. With any other provider
 selected, the transcribed text is sent to that provider for clean-up; AUDAX says where. API
-keys and tokens are never written to the log. If a provider fails, AUDAX pastes the raw transcript and says "Pasted without
-clean-up".
+keys and tokens are never written to the log. If a provider fails, AUDAX pastes the raw
+transcript and says "Pasted without clean-up".
 
 ## Build from source
 

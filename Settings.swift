@@ -76,11 +76,16 @@ final class Settings: ObservableObject {
     @Published var sounds: Bool {
         didSet { UserDefaults.standard.set(sounds, forKey: "sounds") }
     }
-    @Published var provider: String {  // "ollama" | "copilot" | "claude" | "openai"
+    @Published var provider: String {  // an id of ProviderInfo.all, e.g. "ollama"
         didSet { UserDefaults.standard.set(provider, forKey: "provider") }
     }
     @Published var models: [String: String] {  // provider → model name
         didSet { UserDefaults.standard.set(models, forKey: "models") }
+    }
+    /// provider → its endpoint fields: base_url, auth_header, api_version (Foundry and the
+    /// compatible gateways); region, aws_auth, aws_profile (Bedrock). Secrets: the Keychain.
+    @Published var advanced: [String: [String: String]] {
+        didSet { UserDefaults.standard.set(advanced, forKey: "advanced") }
     }
     @Published var wordSubs: [WordSub] {  // the user's own corrections, in userSubsPath
         didSet { saveWordSubs() }
@@ -112,6 +117,7 @@ final class Settings: ObservableObject {
         provider = d.string(forKey: "provider") ?? "ollama"
         let stored = d.dictionary(forKey: "models") as? [String: String] ?? [:]
         models = Settings.migrateCopilotDefault(Settings.defaultModels.merging(stored) { $1 })
+        advanced = d.dictionary(forKey: "advanced") as? [String: [String: String]] ?? [:]
         wordSubs = Settings.readWordSubs() ?? []
         savedSubs = Settings.pairs(wordSubs)
     }

@@ -10,6 +10,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 from pathlib import Path
 
@@ -332,5 +333,50 @@ code, printed = run_main({"provider": "claude", "model": "m", "api_key": ECHO})
 assert code == 0 and json.loads(printed)["cleanup"] == "skipped", printed
 assert ECHO not in printed and ECHO not in dictate.LOG.read_text(encoding="utf-8")
 dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
+
+
+class Peer(http.server.BaseHTTPRequestHandler):
+    """Sends Peer.raw (status line, headers and body as given), then Peer.slow one byte every
+    0.5 s, 4 s at most. /elsewhere answers a transcript: where a redirect would lead."""
+    raw, slow, paths = b"", b"", []
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.do_GET()
+
+    def do_GET(self):
+        Peer.paths.append(self.path)
+        if self.path == "/elsewhere":
+            body = b'{"text": "redirected"}'
+            return self.wfile.write(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s"
+                                    % (len(body), body))
+        try:
+            self.wfile.write(Peer.raw)
+            for i in range(min(len(Peer.slow), 8)):
+                time.sleep(0.5)
+                self.wfile.write(Peer.slow[i:i + 1])
+        except OSError:  # the client hung up
+            pass
+
+    def log_message(self, *args):
+        pass
+
+
+def answer(body: bytes, status: bytes = b"200 OK", extra: bytes = b"") -> bytes:
+    return b"HTTP/1.1 %s\r\n%sContent-Length: %d\r\n\r\n%s" % (status, extra, len(body), body)
+
+
+peer = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Peer)  # daemon threads
+threading.Thread(target=peer.serve_forever, daemon=True).start()
+PEER = "http://127.0.0.1:%d" % peer.server_port
+dictate.transcribe_cli = lambda wav, vocab, language: "fallback text"
+
+# JSON nested 100,000 deep: read_config gives defaults, transcribe falls back to whisper-cli.
+DEEP = "[" * 100000 + "]" * 100000
+assert dictate.read_config(io.StringIO(DEEP)) == dictate.DEFAULT_CONFIG
+Peer.raw = answer(DEEP.encode())
+assert dictate.transcribe(wav, [], "en", server_url=PEER + "/inference") == ("fallback text",
+                                                                            "cli")
+dictate.transcribe_cli = real_cli
 
 print("ok")

@@ -75,7 +75,8 @@ def read_config(stream) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     try:
         data = {} if stream.isatty() else json.loads(stream.read() or "{}")
-    except (OSError, ValueError, AttributeError):  # unreadable, not JSON, or no stream at all
+    # Unreadable, not JSON, nested too deep for the parser, or no stream at all.
+    except (OSError, ValueError, AttributeError, RecursionError):
         data = {}
     if isinstance(data, dict):
         cfg.update(data)
@@ -190,10 +191,11 @@ def transcribe(wav: Path, vocab: list, language: str, server_url: str) -> tuple:
     """(text, "server"|"cli"). whisper-cli whenever the server is not running, refuses, times
     out, breaks off or replies without a usable "text" (OSError covers URLError, HTTPError and
     timeouts; ValueError a reply that is not JSON or has no text string; KeyError the server's
-    {"error"} reply; HTTPException a cut-off reply such as IncompleteRead)."""
+    {"error"} reply; HTTPException a cut-off reply such as IncompleteRead; RecursionError JSON
+    nested too deep to parse)."""
     try:
         return transcribe_server(wav, vocab, language, url=server_url), "server"
-    except (OSError, ValueError, KeyError, http.client.HTTPException):
+    except (OSError, ValueError, KeyError, http.client.HTTPException, RecursionError):
         return transcribe_cli(wav, vocab, language), "cli"
 
 

@@ -24,10 +24,9 @@ let maxSeconds = 300.0  // the only automatic stop
 // the dictation ends with "Microphone did not start". A Bluetooth headset can take a second or
 // two to switch its mic on; a stuck CoreAudio device never does.
 let micStartTimeout = 3.0
-// ponytail: calibration knob, not measured. dictate.py is terminated after this long. Its own
-// worst case is longer (whisper-server 60 s, whisper-cli up to 330 s, clean-up 20 s), so a long
-// recording that falls back to whisper-cli on a slow Mac may need more.
-let dictateTimeout = 120.0
+// dictate.py is terminated after this long. Its own timeouts bound it at about 410 s
+// (whisper-server 60 s, whisper-cli 330 s, clean-up 20 s); this never undercuts them.
+let dictateTimeout = 450.0
 let tick = 0.05
 let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't open file"
 
@@ -119,8 +118,8 @@ func testResultText(_ data: Data) -> String {
 
 /// Runs dictate.py (`proc`, stdin already set). Its stdout and stderr are read while it runs:
 /// read only after exit, output over the pipe buffer (64 KB) would block it for good. After
-/// dictateTimeout it is terminated, with a log line. `done` runs on main with (exit status,
-/// stdout, stderr).
+/// dictateTimeout it is terminated, its children first, with a log line. `done` runs on main
+/// with (exit status, stdout, stderr).
 func runDictate(_ proc: Process, done: @escaping (Int32, Data, Data) -> Void) throws {
     let out = Pipe(), err = Pipe(), exited = DispatchSemaphore(value: 0)
     proc.standardOutput = out
@@ -130,6 +129,7 @@ func runDictate(_ proc: Process, done: @escaping (Int32, Data, Data) -> Void) th
     DispatchQueue.main.asyncAfter(deadline: .now() + dictateTimeout) {
         guard proc.isRunning else { return }
         appendToLog(["error": "dictate.py timed out"])
+        terminateChildren(of: proc.processIdentifier)  // first: after it they would be orphans
         proc.terminate()
     }
     DispatchQueue.global().async {
@@ -144,6 +144,15 @@ func runDictate(_ proc: Process, done: @escaping (Int32, Data, Data) -> Void) th
         exited.wait()
         DispatchQueue.main.async { done(proc.terminationStatus, output, problem) }
     }
+}
+
+/// SIGTERM to `pid`'s child processes (whisper-cli, gh), so none outlives a stopped dictate.py.
+/// terminate() alone reached a child in dictate.py's process group (measured), but not one in a
+/// new session; this does not depend on either. ponytail: direct children only, at most 64.
+func terminateChildren(of pid: pid_t) {
+    var kids = [pid_t](repeating: 0, count: 64)
+    let count = proc_listchildpids(pid, &kids, Int32(kids.count * MemoryLayout<pid_t>.size))
+    for kid in kids.prefix(Int(max(count, 0))) where kid > 0 { kill(kid, SIGTERM) }
 }
 
 /// Short generated sounds, each played by a fresh NSSound from a WAV rendered once at launch.

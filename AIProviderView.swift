@@ -35,6 +35,7 @@ struct AIProviderView: View {
     }
     var activeID: String { ProviderInfo.active(settings, env: env) }
     var envProvider: String? { EnvFile.nonEmpty(env["AUDAX_PROVIDER"]) }
+    var envKeys: [String] { EnvFile.setKeys(for: id, env: env) }
     var envFields: [String] { EnvFile.setFields(for: id, env: env) }
     var showsEnvBanner: Bool { envProvider != nil || !envFields.isEmpty }
     var keyBased: Bool { id != "ollama" && id != "copilot" }
@@ -190,7 +191,8 @@ struct AIProviderView: View {
         Section {
             ForEach(secrets, id: \.account) { secret in
                 SecretRow(secret: secret, draft: draft(secret.account),
-                          stored: stored.contains(secret.account), save: save,
+                          stored: stored.contains(secret.account),
+                          fromEnv: envKeys.contains(secret.field), save: save,
                           remove: { removing = $0 })
             }
             if id == "bedrock" {
@@ -416,7 +418,8 @@ struct AIProviderView: View {
 // MARK: - Pieces (nested, so their names never meet another file's)
 
 extension AIProviderView {
-    /// The eight providers as selectable tiles: two to a row, one in a narrow pane.
+    /// The eight providers as selectable tiles: two to a row, one in a narrow pane (the
+    /// minimum keeps "Other (Anthropic-compatible)" on one line).
     struct ProviderGrid: View {
         @Binding var selection: String
         let envChoice: String?  // the provider the .env selects, when it differs
@@ -427,7 +430,7 @@ extension AIProviderView {
             "anthropic_compatible": .gray]
 
         var body: some View {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 232), spacing: 8)], spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 8)], spacing: 8) {
                 ForEach(ProviderInfo.all, id: \.id) { p in
                     ProviderTile(name: p.name, symbol: p.symbol, blurb: p.blurb,
                                  tint: Self.tints[p.id] ?? .gray, selected: selection == p.id,
@@ -456,7 +459,7 @@ extension AIProviderView {
                             .minimumScaleFactor(0.85)
                         Text(fromEnv ? "Selected in the .env file" : blurb)
                             .font(.caption).foregroundStyle(fromEnv ? Color.blue : .secondary)
-                            .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
@@ -466,7 +469,7 @@ extension AIProviderView {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, minHeight: 64, maxHeight: 64, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56, alignment: .leading)
                 .background(shape.fill(selected ? Color.accentColor.opacity(0.12)
                                        : Color.primary.opacity(0.035)))
                 .overlay(shape.strokeBorder(selected ? Color.accentColor.opacity(0.7)
@@ -554,11 +557,13 @@ extension AIProviderView {
         }
     }
 
-    /// One Keychain secret: a secure field with Save, and Remove once something is saved.
+    /// One Keychain secret: a secure field and one button. Save while something is typed (it
+    /// replaces a saved secret); Remove… while a secret is saved and the field is empty.
     struct SecretRow: View {
         let secret: ProviderSecret
         @Binding var draft: String
         let stored: Bool
+        let fromEnv: Bool  // the .env sets it: that value wins over a saved one
         let save: (ProviderSecret) -> Void
         let remove: (ProviderSecret) -> Void
 
@@ -570,13 +575,15 @@ extension AIProviderView {
                         .textFieldStyle(.roundedBorder)
                         .multilineTextAlignment(.leading)
                         .onSubmit { if !blank { save(secret) } }
-                    Button("Save") { save(secret) }.disabled(blank)
-                    // Always laid out, so every field in the section starts at the same x.
-                    Button("Remove…", role: .destructive) { remove(secret) }
-                        .help("Delete this \(secret.label.lowercased()) from the Keychain")
-                        .opacity(stored ? 1 : 0)
-                        .disabled(!stored)
-                        .accessibilityHidden(!stored)
+                    Group {  // one fixed slot: every field on the screen ends at the same x
+                        if stored && blank {
+                            Button("Remove…", role: .destructive) { remove(secret) }
+                                .help("Delete this \(secret.label.lowercased()) from the Keychain")
+                        } else {
+                            Button("Save") { save(secret) }.disabled(blank)
+                        }
+                    }
+                    .frame(width: 84, alignment: .trailing)
                 }
                 .frame(width: AIProviderView.fieldWidth)
             } label: {
@@ -592,7 +599,8 @@ extension AIProviderView {
 
         var blank: Bool { draft.trimmingCharacters(in: .whitespaces).isEmpty }
         var prompt: String {
-            stored ? "Saved in the Keychain" : secret.optional ? "Optional" : "Paste to save"
+            if fromEnv { return "Set in the .env file" }
+            return stored ? "Saved in the Keychain" : secret.optional ? "Optional" : "Paste to save"
         }
     }
 
@@ -645,7 +653,8 @@ extension AIProviderView {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: AIProviderView.fieldWidth)
+                .fixedSize()  // its natural width, ending where the fields end
+                .frame(width: AIProviderView.fieldWidth, alignment: .trailing)
             }
             if method.wrappedValue == "profile" {
                 FieldRow("Profile name") {
@@ -720,7 +729,7 @@ extension AIProviderView {
 
         var body: some View {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Button(action: test) {
                         Label("Test connection", systemImage: "network")
                     }

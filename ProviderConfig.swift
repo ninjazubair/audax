@@ -370,26 +370,33 @@ enum EnvFile {
         setKeys(for: id, env: env).compactMap { fieldNames[$0] }
     }
 
-    /// Creates the commented template (0600, folder 0700) only when no file exists, then opens
-    /// the file in the default text editor. O_EXCL: an existing file is never written.
+    /// Creates the template if the file is missing, then opens the file in the default text
+    /// editor.
     static func openOrCreateTemplate() {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: url.deletingLastPathComponent(),
-                                withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
-        if fd >= 0 {
-            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-            try? file.write(contentsOf: Data(template.utf8))  // throws, never raises
-            try? file.close()
-        } else if errno != EEXIST {
-            let why = String(cString: strerror(errno))
-            return appendToLog(["warning": ".env template not created: \(why)"])
-        }
+        guard createTemplateIfMissing() else { return }
         let ws = NSWorkspace.shared
         let textEdit = URL(fileURLWithPath: "/System/Applications/TextEdit.app")
         let editor = ws.urlForApplication(toOpen: UTType.plainText) ?? textEdit
         ws.open([url], withApplicationAt: editor, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    /// The commented template (0600, a new folder 0700), only when no file exists: O_EXCL, so an
+    /// existing file is never written. False (logged) when there is no file to open.
+    static func createTemplateIfMissing() -> Bool {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        let fd = open(url.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            if errno == EEXIST { return true }
+            let why = String(cString: strerror(errno))
+            appendToLog(["warning": ".env template not created: \(why)"])
+            return false
+        }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        try? file.write(contentsOf: Data(template.utf8))  // throws, never raises
+        try? file.close()
+        return true
     }
 
     /// Every line a comment: creating the file changes nothing until the user edits it.

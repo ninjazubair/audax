@@ -382,7 +382,26 @@ d = Path(tempfile.mkdtemp())
 assert providers.load_env_file(d / ".env") == {
     "AUDAX_PROVIDER": "foundry", "AUDAX_MODEL": "gpt-5-mini", "AZURE_OPENAI_API_KEY": "abc=def",
     "AUDAX_BASE_URL": "https://x.example/v1", "AWS_SECRET_ACCESS_KEY": "a/b+c==", "EMPTY": "",
-    "HALF": "\"open", "AUDAX_API_VERSION": "$HOME", "SPACED": "1"}
+    "AUDAX_API_VERSION": "$HOME", "SPACED": "1"}  # HALF: no closing quote, ignored
+# The grammar Swift's EnvFile shares (0.4.0 ruling), one rule per line.
+(d / "grammar.env").write_bytes((
+    "﻿BOM=1\r\n"  # a UTF-8 BOM, then CRLF
+    "CR=2\rAFTER_CR=3\n"  # a bare CR ends a line too
+    "export\tTABBED=4\n"
+    "INLINE=plain value # a comment\n"
+    "TABHASH=v\t# a comment after a tab\n"
+    "HASHED=a#b\n"  # no blank before the "#": part of the value
+    "DQ=\"kept # inside\"  # a comment\n"
+    "SQ='x'#c\n"
+    "KEEP=one\nKEEP=\"two\" junk\n"  # junk after the closing quote: the line is ignored
+    "DUP=first\nDUP=last\n"
+    "NOBREAK=1 x\x0cy\n"  # only \n, \r\n and \r end a line
+    "export=5\n").encode("utf-8"))
+assert providers.load_env_file(d / "grammar.env") == {
+    "BOM": "1", "CR": "2", "AFTER_CR": "3", "TABBED": "4", "INLINE": "plain value",
+    "TABHASH": "v", "HASHED": "a#b", "DQ": "kept # inside", "SQ": "x", "KEEP": "one",
+    "DUP": "last", "NOBREAK": "1 x\x0cy", "export": "5"}, providers.load_env_file(
+        d / "grammar.env")
 assert providers.load_env_file(str(d / ".env"))["AUDAX_PROVIDER"] == "foundry"  # str or Path
 assert providers.load_env_file(d / "missing.env") == {}
 assert providers.load_env_file(d) == {}  # a directory
@@ -414,6 +433,25 @@ assert providers.apply_env({"provider": "bedrock", "aws_auth": "access_key"}, {
     "provider": "bedrock", "aws_auth": "profile", "aws_profile": "work"}
 assert providers.apply_env({"provider": "bedrock"}, {
     "AZURE_OPENAI_API_KEY": "az", "OPENAI_API_KEY": "o"}) == {"provider": "bedrock"}
+# AWS keys are one unit: a .env key never goes out with the settings' session token (a 403).
+AWS_SET = {"provider": "bedrock", "model": "m", "region": "us-east-1", "aws_auth": "access_key",
+           "aws_access_key_id": "AKSET", "aws_secret_access_key": "SKSET",
+           "aws_session_token": "STSET"}
+got = providers.apply_env(AWS_SET, {"AWS_ACCESS_KEY_ID": AK, "AWS_SECRET_ACCESS_KEY": SK})
+assert got == {**AWS_SET, "aws_access_key_id": AK, "aws_secret_access_key": SK,
+               "aws_session_token": ""}, got
+h = providers.bedrock_request(got, "S", "U", now=NOW)[1]
+assert "x-amz-security-token" not in h and "Credential=AKIDEXAMPLE/" in h["Authorization"]
+got = providers.apply_env(AWS_SET, {"AWS_ACCESS_KEY_ID": AK})  # the settings' secret not used
+assert got["aws_secret_access_key"] == "" and got["aws_session_token"] == "", got
+try:
+    providers.bedrock_request(got, "S", "U")
+    assert False
+except ValueError as e:
+    assert str(e) == "bedrock: aws_secret_access_key is not set", e
+assert providers.apply_env(AWS_SET, {"AWS_SESSION_TOKEN": "STENV"}) == AWS_SET  # alone: ignored
+assert providers.apply_env({"provider": "bedrock", "aws_auth": "api_key"}, {
+    "AWS_SESSION_TOKEN": "STENV"}) == {"provider": "bedrock", "aws_auth": "api_key"}
 assert providers.apply_env({"provider": "openai", "api_key": "mine"}, {
     "AUDAX_PROVIDER": "foundry", "AUDAX_API_KEY": "generic", "AZURE_OPENAI_API_KEY": "az",
     "AZURE_OPENAI_ENDPOINT": "https://r.openai.azure.com", "AZURE_OPENAI_API_VERSION": "preview",
@@ -501,6 +539,35 @@ url, h, _ = providers.anthropic_compatible_request({**ac, "auth_header": "bearer
                                                     "api_version": "2023-06-01"}, "S", "U")
 assert url.endswith("/anthropic/v1/messages?api-version=2023-06-01")
 assert h["Authorization"] == "Bearer k" and "x-api-key" not in h
+# A whole endpoint pasted as base_url (an Azure Target URI): its path is not added twice, its
+# query is kept, and api_version replaces the query's api-version (never two).
+TARGET = ("https://r.openai.azure.com/openai/deployments/gpt-4o/chat/completions"
+          "?api-version=2024-10-21")
+assert providers.foundry_request({**fo, "base_url": TARGET}, "S", "U")[0] == TARGET
+assert providers.openai_compatible_request({**gw, "base_url": TARGET}, "S", "U")[0] == TARGET
+assert providers.foundry_request(
+    {**fo, "base_url": TARGET + "&x=1", "api_version": "2025-01-01-preview"}, "S", "U")[0] == (
+    "https://r.openai.azure.com/openai/deployments/gpt-4o/chat/completions"
+    "?x=1&api-version=2025-01-01-preview")
+assert providers.openai_compatible_request(
+    {**gw, "base_url": "https://gw.example/v1/?team=a"}, "S", "U")[0] == (
+    "https://gw.example/v1/chat/completions?team=a")
+assert providers.openai_compatible_request(
+    {**gw, "base_url": "https://gw.example/v1/chat/completions?api-version=a&api-version=b"},
+    "S", "U")[0] == "https://gw.example/v1/chat/completions?api-version=b"
+ANT = "https://r.services.ai.azure.com/anthropic/v1/messages?api-version=2023-06-01"
+assert providers.anthropic_compatible_request({**ac, "base_url": ANT}, "S", "U")[0] == ANT
+assert providers.anthropic_compatible_request(
+    {**ac, "base_url": ANT, "api_version": "2024-02-02"}, "S", "U")[0] == (
+    "https://r.services.ai.azure.com/anthropic/v1/messages?api-version=2024-02-02")
+assert providers.anthropic_compatible_request(
+    {**ac, "base_url": "https://gw.example/v1/messages/"}, "S", "U")[0] == (
+    "https://gw.example/v1/messages")
+cfg = providers.apply_env({"provider": "foundry", "model": "m"}, {  # the same through the .env
+    "AZURE_OPENAI_ENDPOINT": TARGET, "AZURE_OPENAI_API_KEY": "k",
+    "AZURE_OPENAI_API_VERSION": "2025-01-01-preview"})
+assert providers.foundry_request(cfg, "S", "U")[0] == TARGET.replace("2024-10-21",
+                                                                     "2025-01-01-preview")
 br = {"model": "anthropic.claude-test-v1:0", "region": "us-east-1", "api_key": "tok",
       "aws_auth": "api_key"}
 url, h, b = providers.bedrock_request(br, "SYS", "USR")
@@ -590,6 +657,19 @@ for token, signature in (
 # signs it once, so it disagrees here and only here; see the task-6 report).
 assert providers.canonical_uri("/model/anthropic.claude-test-v1%3A0/converse") == (
     "/model/anthropic.claude-test-v1%253A0/converse")
+# Known answer from aws-cli 2.36.19 (botocore) "bedrock-runtime converse --endpoint-url" against
+# a local recorder (25 Oct 2026, these dummy keys, no AWS): the request line, Host, X-Amz-Date,
+# body and Authorization as captured. A single-encoded %3A gives a different signature.
+AWSCLI_BODY = (b'{"messages": [{"role": "user", "content": [{"text": "U"}]}], "system": '
+               b'[{"text": "S"}], "inferenceConfig": {"maxTokens": 2048}}')
+got = providers.sigv4_sign(
+    "POST", "http://127.0.0.1:56138/model/anthropic.claude-test-v1%3A0/converse", AWSCLI_BODY,
+    "application/json", "20261025T092039Z", region="us-east-1", service="bedrock",
+    access_key=AK, secret_key=SK)
+assert got["Authorization"] == (
+    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261025/us-east-1/bedrock/aws4_request, "
+    "SignedHeaders=content-type;host;x-amz-date, Signature="
+    "cfdd5615e0e451ed837622257ae6b4b935d33b669e6f1325641eb3bbbc9cacbe"), got
 assert providers.canonical_uri("") == "/" and providers.canonical_uri("/") == "/"
 
 # Bedrock signed with an access key; sigv4_headers takes now as UTC (naive = UTC).

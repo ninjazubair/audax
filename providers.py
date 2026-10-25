@@ -139,28 +139,45 @@ def claude_request(cfg: dict, system: str, user: str) -> tuple:
     return CLAUDE_URL, headers, body
 
 
+ENV_BLANKS = " \t"  # whitespace in the .env grammar: trimmed, and before an inline "#"
+
+
+def env_value(value: str) -> Optional[str]:
+    """A trimmed .env VALUE. Quoted (' or "): up to the matching closing quote, no escapes, and
+    after it only blanks or a # comment. Unquoted: up to the first blank + "#", trimmed.
+    None means the line is ignored: junk after the closing quote, or no closing quote."""
+    if value[:1] in ("'", '"'):
+        end = value.find(value[0], 1)
+        if end < 0:
+            return None
+        rest = value[end + 1:].lstrip(ENV_BLANKS)
+        return value[1:end] if rest[:1] in ("", "#") else None
+    comment = re.search(r"[ \t]#", value)
+    return value[:comment.start()].strip(ENV_BLANKS) if comment else value
+
+
 def env_line(line: str) -> Optional[tuple]:
-    """(key, value) of one .env line, or None for a blank line, a comment or no "="."""
-    line = line.strip()
-    if line.startswith("export "):
-        line = line[len("export "):].lstrip()
-    key, sep, value = line.partition("=")
-    key, value = key.strip(), value.strip()
-    if not sep or not key or key.startswith("#"):
+    """(key, value) of one .env line, or None: blank, a # comment, no "=", no key, or a quoted
+    value the grammar rejects. An optional "export" + space or tab is dropped first."""
+    line = line.strip(ENV_BLANKS)
+    if line.startswith("#"):
         return None
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-        value = value[1:-1]
-    return key, value
+    export = re.match(r"export[ \t]+", line)
+    key, sep, value = line[export.end() if export else 0:].partition("=")
+    key, value = key.strip(ENV_BLANKS), env_value(value.strip(ENV_BLANKS))
+    return (key, value) if sep and key and value is not None else None
 
 
 def load_env_file(path) -> dict:
-    """KEY=VALUE lines of a .env file. Blank lines and # comments are skipped, a leading
-    "export " is dropped, one pair of matching quotes around a value is stripped; no variable
-    expansion. A missing, unreadable or non-UTF-8 file gives {}. Never raises, never logs."""
+    """KEY=VALUE pairs of a .env file, by the grammar Swift's EnvFile shares: a UTF-8 BOM is
+    stripped, lines end at \\n, \\r\\n or \\r, then env_line; no variable expansion; a repeated
+    key: the last one wins. A missing, unreadable or non-UTF-8 file gives {}. Never raises,
+    never logs."""
     try:
-        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+        content = Path(path).read_text(encoding="utf-8-sig")
     except (OSError, ValueError, TypeError):  # missing, no permission, not UTF-8, no path
         return {}
+    lines = re.split(r"\r\n|\r|\n", content)  # not splitlines: it also splits on \f,  ...
     return dict(pair for pair in map(env_line, lines) if pair)
 
 
@@ -170,13 +187,16 @@ def env_values(env: dict, mapping: dict) -> dict:
 
 def bedrock_env(env: dict) -> dict:
     """The Bedrock fields a .env sets: the region, then one way to sign in, in this order:
-    a Bedrock API key, an access key, a profile."""
+    a Bedrock API key, an access key, a profile. An access key is one unit: when the .env has
+    AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY, all three AWS fields come from the .env (no
+    AWS_SESSION_TOKEN there means none), never mixed with the settings' (AWS answers 403).
+    An AWS_SESSION_TOKEN on its own changes nothing."""
     region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION")  # the SDKs' order
     out = {"region": region} if region else {}
-    keys = env_values(env, AWS_KEYS_ENV)
     if env.get("AWS_BEARER_TOKEN_BEDROCK"):
         return {**out, "api_key": env["AWS_BEARER_TOKEN_BEDROCK"], "aws_auth": "api_key"}
-    if keys:
+    if env.get("AWS_ACCESS_KEY_ID") or env.get("AWS_SECRET_ACCESS_KEY"):
+        keys = {field: env.get(name, "") for name, field in AWS_KEYS_ENV.items()}
         return {**out, **keys, "aws_auth": "access_key"}
     if env.get("AWS_PROFILE"):
         return {**out, "aws_profile": env["AWS_PROFILE"], "aws_auth": "profile"}
@@ -208,16 +228,26 @@ def auth_headers(style: str, key: str, default: str = "bearer") -> dict:
 
 def base_endpoint(cfg: dict, provider: str, path: str) -> str:
     """base_url + path [+ ?api-version=...]. A Foundry resource root (as AZURE_OPENAI_ENDPOINT
-    is usually written) gets the OpenAI v1 path, /openai/v1."""
+    is usually written) gets the OpenAI v1 path, /openai/v1. A whole endpoint pasted as base_url
+    (an Azure Target URI, .../chat/completions?api-version=...) keeps its path, not doubled,
+    and its query; api_version, when set, replaces the query's api-version: never two."""
     need(cfg, provider, "base_url")
-    base = text(cfg, "base_url").rstrip("/")
-    parts = urllib.parse.urlsplit(base)
+    parts = urllib.parse.urlsplit(text(cfg, "base_url"))
     if parts.scheme not in ("https", "http") or not parts.netloc:  # urllib also opens file://
         raise ValueError(f"{provider}: base_url must start with https:// or http://")
-    if provider == "foundry" and not parts.path:
-        base += "/openai/v1"
-    version = text(cfg, "api_version")
-    return base + path + ("?" + urllib.parse.urlencode({"api-version": version}) if version else "")
+    route = parts.path.rstrip("/") or ("/openai/v1" if provider == "foundry" else "")
+    if not route.endswith(path):
+        route += path
+    query = with_api_version(parts.query, text(cfg, "api_version"))
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, route, query, ""))
+
+
+def with_api_version(query: str, version: str) -> str:
+    """query with at most one api-version: version when set, else the query's own (the last)."""
+    pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+    version = version or dict(pairs).get("api-version", "")
+    pairs = [pair for pair in pairs if pair[0] != "api-version"]
+    return urllib.parse.urlencode(pairs + ([("api-version", version)] if version else []))
 
 
 def keyed_request(cfg: dict, provider: str, path: str, default_style: str) -> tuple:

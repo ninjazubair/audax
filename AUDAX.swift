@@ -109,75 +109,78 @@ func testResultText(_ data: Data) -> String {
     return reply?["error"] as? String ?? "No result from providers.py"
 }
 
-/// Short generated chimes, independent of the alert-volume slider. The audio engine runs only
-/// while a chime plays, so the speakers are not held open (and idle sleep not blocked) all day.
+/// Short generated sounds, each played by a fresh NSSound from a WAV rendered once at launch.
+/// NSSound.play() returns at once: on a stuck audio output it returns false (no sound, one log
+/// line) where AVAudioEngine blocked the main thread and then aborted ("player did not see an
+/// IO cycle", 2026-10-25).
 final class Chime {
-    let engine = AVAudioEngine()
-    let player = AVAudioPlayerNode()
-    let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
-    var pending = 0
-    var warned = false  // the engine warning, logged once per dictation (beginRecording resets it)
+    static let rate = 44100.0
+    // Soft pitch glides, 0.25 s each. ponytail: `peak` is a listening knob — 0.12 is a little
+    // above the 0.08 of the app the owner likes.
+    let startWAV = Chime.wav(Chime.glide(from: 390, to: 520))  // up: listening
+    let stopWAV = Chime.wav(Chime.glide(from: 520, to: 390))  // down: recording finished
+    let nothingWAV = Chime.wav(Chime.glide(from: 330, to: 247, peak: 0.09))  // lower: nothing
+    var started: NSSound?  // the last start sound, so a cancelled recording can cut it short
+    var playing: [NSSound] = []  // keeps the last few alive while they play; bounded, no leak
+    var warned = false  // "sound did not play", logged once per dictation (beginRecording resets)
 
-    init() {
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-    }
+    func start() { started = play(startWAV) }  // recording starts 0.1 s in
+    func stop() { play(stopWAV) }
+    func nothing() { play(nothingWAV) }
 
-    func play(_ buf: AVAudioPCMBuffer?) {
-        guard let buf = buf else { return }
-        if !engine.isRunning { try? engine.start() }
-        // No sound and a log line, not a crash: play() on an engine that failed to start raises an
-        // Objective-C exception ("player did not see an IO cycle", seen with audio output wedged).
-        // ponytail: a running engine whose device dies mid-play can still raise; catching that
-        // needs an Objective-C @try bridge, which this Swift-only build does not have.
-        guard engine.isRunning else {
-            if !warned { appendToLog(["warning": "audio engine did not start"]) }
+    @discardableResult
+    func play(_ wav: Data) -> NSSound? {
+        guard let sound = NSSound(data: wav), sound.play() else {
+            if !warned { appendToLog(["warning": "sound did not play"]) }
             warned = true
-            return
+            return nil
         }
-        pending += 1
-        player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async { self?.finished() }
-        }
-        player.play()
-    }
-
-    func finished() {
-        pending -= 1
-        if pending == 0 {
-            player.stop()
-            engine.stop()
-        }
+        // ponytail: the 4 most recent stay referenced. A sound is 0.25 s, so a fifth starting
+        // before the first ends would take a script; keep each until its delegate's
+        // didFinishPlaying if that ever matters.
+        playing = Array((playing + [sound]).suffix(4))
+        return sound
     }
 
     /// One sine tone gliding exponentially from `from` to `to` Hz over `sweep` seconds, then
     /// holding. Envelope: rises towards `peak` with a 40 ms time constant, and from 80 ms decays
     /// with a 50 ms time constant; the last 10 ms taper to zero so the end does not click.
-    func glide(from: Double, to: Double, sweep: Double = 0.15, duration: Double = 0.25,
-               peak: Double = 0.12) -> AVAudioPCMBuffer? {
-        let rate = format.sampleRate
-        let frames = AVAudioFrameCount(duration * rate)
-        guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
-        buf.frameLength = frames
-        let out = buf.floatChannelData![0]
+    static func glide(from: Double, to: Double, sweep: Double = 0.15, duration: Double = 0.25,
+                      peak: Double = 0.12) -> [Double] {
         let atRelease = peak * (1 - exp(-0.08 / 0.04))
         var phase = 0.0
-        for i in 0..<Int(frames) {
+        return (0..<Int(duration * rate)).map { i in
             let t = Double(i) / rate
             let freq = from * pow(to / from, min(t, sweep) / sweep)
             phase += 2 * .pi * freq / rate
             var gain = t < 0.08 ? peak * (1 - exp(-t / 0.04)) : atRelease * exp(-(t - 0.08) / 0.05)
             gain *= min(1, (duration - t) / 0.01)
-            out[i] = Float(gain * sin(phase))
+            return gain * sin(phase)
         }
-        return buf
     }
 
-    // Soft pitch glides (0.25 s each), quieter than a system alert. ponytail: `peak` is a
-    // listening knob — 0.12 is a little above the 0.08 of the app the owner likes.
-    func start() { play(glide(from: 390, to: 520)) }  // up: listening; recording starts at 0.1 s
-    func stop() { play(glide(from: 520, to: 390)) }  // down: recording finished
-    func nothing() { play(glide(from: 330, to: 247, peak: 0.09)) }  // lower: nothing heard
+    /// 16-bit PCM, mono, `rate` Hz: a 44-byte RIFF/WAVE header, then the samples little-endian.
+    static func wav(_ samples: [Double]) -> Data {
+        var data = Data()
+        func put<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        let bytes = UInt32(samples.count * 2), hz = UInt32(rate)
+        data.append(contentsOf: Array("RIFF".utf8))
+        put(36 + bytes)  // the file's size after these 8 bytes
+        data.append(contentsOf: Array("WAVEfmt ".utf8))
+        put(UInt32(16))  // fmt chunk size
+        put(UInt16(1))  // PCM
+        put(UInt16(1))  // mono
+        put(hz)
+        put(hz * 2)  // bytes per second
+        put(UInt16(2))  // bytes per frame
+        put(UInt16(16))  // bits per sample
+        data.append(contentsOf: Array("data".utf8))
+        put(bytes)
+        for s in samples { put(Int16((min(1, max(-1, s)) * 32767).rounded())) }
+        return data
+    }
 }
 
 /// Bar level for the pill from the recorder's level: tracks the room's noise floor so that only
@@ -676,9 +679,9 @@ final class App: NSObject, NSApplicationDelegate {
     /// Hands-free (locked) recordings are left alone.
     func cancelRecording() {
         guard settings.talkKey.isFnOnly, phase == .recording, mode == .hold else { return }
-        // Cuts the start sound to a blip. stop() still runs the buffer's completion handler,
-        // once (checked), so Chime's pending count and engine stop stay right.
-        chime.player.stop()
+        // Cuts the start sound to a blip: NSSound.stop() ends that one sound at once. Nil (sounds
+        // off, or it did not play) does nothing.
+        chime.started?.stop()
         timer?.invalidate()
         timer = nil
         recorder?.stop()

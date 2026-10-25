@@ -254,7 +254,6 @@ final class App: NSObject, NSApplicationDelegate {
         signInGitHub: { [unowned self] in self.signInGitHub() },
         startOllama: { NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app")) },
         openLog: { [unowned self] in self.openLog() },
-        openSettings: { [unowned self] in self.showSettings() },
         pauseHotKeys: { [unowned self] in self.pauseHotKeys($0) },
         openKeyboardSettings: {
             let pane = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"

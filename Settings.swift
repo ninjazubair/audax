@@ -6,7 +6,7 @@ import SwiftUI
 /// API keys, as generic passwords in the login keychain: never in UserDefaults, files, the
 /// environment or the log. The stable signing identity keeps them readable across rebuilds.
 enum Keychain {
-    static let service = "local.audax"  // accounts: "claude", "openai"
+    static let service = "local.audax"  // accounts: ProviderInfo.accounts
 
     static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -96,16 +96,6 @@ final class Settings: ObservableObject {
     static let defaultModels = [
         "ollama": "gemma4", "copilot": "gpt-6.1-sol", "claude": "claude-opus-5-5",
         "openai": "gpt-4.1"]
-    /// Picker order and labels.
-    static let providers = [("ollama", "Local Ollama"), ("copilot", "GitHub Copilot"),
-                            ("claude", "Claude API"), ("openai", "OpenAI API")]
-    /// Who receives the text, for each provider that is not on this Mac.
-    static let recipients = ["copilot": "GitHub", "claude": "Anthropic", "openai": "OpenAI"]
-    static let keyProviders = ["claude", "openai"]  // the ones that need an API key
-
-    static func providerName(_ provider: String) -> String {
-        providers.first { $0.0 == provider }?.1 ?? provider
-    }
 
     init() {
         let d = UserDefaults.standard

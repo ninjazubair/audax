@@ -38,7 +38,6 @@ struct Actions {
     let signInGitHub: () -> Void
     let startOllama: () -> Void
     let openLog: () -> Void
-    let openSettings: () -> Void  // the window on Dictation
     let pauseHotKeys: (Bool) -> Void  // true while a shortcut recorder listens
     let openKeyboardSettings: () -> Void
     let fetchCopilotModels: (@escaping ([CopilotModel]) -> Void) -> Void  // App's; [] = failed

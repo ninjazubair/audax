@@ -104,12 +104,16 @@ final class HUD {
         panel.isExcludedFromWindowsMenu = true  // the Window menu lists AUDAX's real windows only
         // Always the dark HUD look, as macOS's own HUDs: readable on light and dark wallpapers.
         panel.appearance = NSAppearance(named: .darkAqua)
-        let effect = NSVisualEffectView()
+        // Explicit frames: autoresizing from a zero-sized parent would size the pill wrong.
+        let effect = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: HUD.minWidth,
+                                                      height: HUD.height))
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.maskImage = HUD.capsule(height: HUD.height)
         let host = NSHostingView(rootView: PillView(state: state))
+        host.sizingOptions = []  // the panel sets the size; the pill's content never resizes it
+        host.frame = effect.bounds
         host.autoresizingMask = [.width, .height]
         effect.addSubview(host)
         panel.contentView = effect
@@ -190,6 +194,7 @@ final class HUD {
                            width: width, height: HUD.height)
         if visible {
             panel.setFrame(frame, display: true)
+            panel.invalidateShadow()  // the shadow follows the capsule's new width
             return
         }
         visible = true

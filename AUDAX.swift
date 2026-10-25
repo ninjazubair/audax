@@ -24,6 +24,10 @@ let maxSeconds = 300.0  // the only automatic stop
 // the dictation ends with "Microphone did not start". A Bluetooth headset can take a second or
 // two to switch its mic on; a stuck CoreAudio device never does.
 let micStartTimeout = 3.0
+// ponytail: calibration knob, not measured. dictate.py is terminated after this long. Its own
+// worst case is longer (whisper-server 60 s, whisper-cli up to 330 s, clean-up 20 s), so a long
+// recording that falls back to whisper-cli on a slow Mac may need more.
+let dictateTimeout = 120.0
 let tick = 0.05
 let exitNothingHeard: Int32 = 3  // dictate.py's code; 2 is python's own "can't open file"
 
@@ -111,6 +115,35 @@ func testResultText(_ data: Data) -> String {
     let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     if reply?["ok"] as? Bool == true { return "OK (\(reply?["ms"] as? Int ?? 0) ms)" }
     return reply?["error"] as? String ?? "No result from providers.py"
+}
+
+/// Runs dictate.py (`proc`, stdin already set). Its stdout and stderr are read while it runs:
+/// read only after exit, output over the pipe buffer (64 KB) would block it for good. After
+/// dictateTimeout it is terminated, with a log line. `done` runs on main with (exit status,
+/// stdout, stderr).
+func runDictate(_ proc: Process, done: @escaping (Int32, Data, Data) -> Void) throws {
+    let out = Pipe(), err = Pipe(), exited = DispatchSemaphore(value: 0)
+    proc.standardOutput = out
+    proc.standardError = err
+    proc.terminationHandler = { _ in exited.signal() }
+    try proc.run()
+    DispatchQueue.main.asyncAfter(deadline: .now() + dictateTimeout) {
+        guard proc.isRunning else { return }
+        appendToLog(["error": "dictate.py timed out"])
+        proc.terminate()
+    }
+    DispatchQueue.global().async {
+        let errDone = DispatchSemaphore(value: 0)
+        var problem = Data()
+        DispatchQueue.global().async {  // both pipes at once: either one can fill up
+            problem = err.fileHandleForReading.readDataToEndOfFile()
+            errDone.signal()
+        }
+        let output = out.fileHandleForReading.readDataToEndOfFile()
+        errDone.wait()
+        exited.wait()
+        DispatchQueue.main.async { done(proc.terminationStatus, output, problem) }
+    }
 }
 
 /// Short generated sounds, each played by a fresh NSSound from a WAV rendered once at launch.
@@ -888,7 +921,6 @@ final class App: NSObject, NSApplicationDelegate {
 
     func runDictateScript() {
         let proc = Process()
-        let out = Pipe(), err = Pipe()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         // -B: never a __pycache__ in the signed app. -X utf8: stdout and the log are UTF-8
         // whatever LANG says (dictate.py writes German text unescaped).
@@ -899,17 +931,13 @@ final class App: NSObject, NSApplicationDelegate {
         input.fileHandleForWriting.write(configJSON())
         input.fileHandleForWriting.closeFile()
         proc.standardInput = input
-        proc.standardOutput = out
-        proc.standardError = err
-        proc.terminationHandler = { p in
-            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let problem = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            DispatchQueue.main.async {
-                if !problem.isEmpty { appendToLog(["stderr": problem, "exit": p.terminationStatus]) }
-                self.transcribed(status: p.terminationStatus, text: text)
+        do {
+            try runDictate(proc) { status, output, problem in
+                let stderr = String(decoding: problem, as: UTF8.self)
+                if !stderr.isEmpty { appendToLog(["stderr": stderr, "exit": status]) }
+                self.transcribed(status: status, text: String(decoding: output, as: UTF8.self))
             }
-        }
-        do { try proc.run() } catch {
+        } catch {
             phase = .idle
             hud.hide()
             appendToLog(["error": "could not start dictate.py: \(error)"])

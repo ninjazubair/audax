@@ -239,8 +239,9 @@ def cleanup(text: str, cfg: dict) -> tuple:
 
     "skipped" gives back the input text, in two cases: the model call or its reply failed with
     one of CLEANUP_ERRORS (network, HTTP status, bad JSON, a reply of the wrong shape, no GitHub
-    sign-in; error = repr of the exception, kept free of the API key by providers.api_key and of
-    the GitHub token by providers.gh_token), or reject_reason
+    sign-in; error = repr of the exception with every secret field of cfg redacted, since a
+    server can echo the key in its reason phrase; the GitHub token is kept out by
+    providers.gh_token), or reject_reason
     refused the answer (error = "rejected: ..."). Any other exception propagates to main: exit 1.
     """
     if cfg["cleanup"] == "off" or not has_words(text):
@@ -250,7 +251,7 @@ def cleanup(text: str, cfg: dict) -> tuple:
         out = ask_model(cfg, system, f"<dictation>{text}</dictation>")
         cleaned = out.replace("<dictation>", "").replace("</dictation>", "").strip()
     except CLEANUP_ERRORS as e:
-        return text, "skipped", repr(e)[:200]
+        return text, "skipped", providers.redact(repr(e), cfg)[:200]
     reason = reject_reason(text, cleaned, cfg["language"])
     if reason:
         return text, "skipped", "rejected: " + reason

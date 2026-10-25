@@ -316,4 +316,21 @@ assert code == 0 and json.loads(printed) == {"text": "Send it ? now.", "cleanup"
 dictate.LOG.read_text(encoding="utf-8")  # every line still strict UTF-8
 dictate.transcribe, dictate.ask_model = real_transcribe, real_ask_model
 
+# A server can echo the key in its reason phrase; the error text is redacted of every secret
+# field of the effective config before the log and stdout see it.
+ECHO = "sk-echo-NEVER-LOG-ME"
+for field, cfg in (("api_key", {"provider": "claude", "model": "m", "api_key": ECHO}),
+                   ("aws_secret_access_key", {"provider": "claude", "model": "m", "api_key": "k",
+                                              "aws_secret_access_key": ECHO})):
+    dictate.providers.post_json = reply_with(urllib.error.HTTPError(
+        "https://api.anthropic.com/v1/messages", 401, "bad key " + ECHO, {}, io.BytesIO(b"")))
+    got = dictate.cleanup("um hello", {**dictate.DEFAULT_CONFIG, **cfg})
+    assert got[:2] == ("um hello", "skipped") and ECHO not in got[2], (field, got)
+    assert "401" in got[2] and "<redacted>" in got[2], (field, got)
+dictate.transcribe = lambda wav, vocab, language, url: ("um so send the update", "cli")
+code, printed = run_main({"provider": "claude", "model": "m", "api_key": ECHO})
+assert code == 0 and json.loads(printed)["cleanup"] == "skipped", printed
+assert ECHO not in printed and ECHO not in dictate.LOG.read_text(encoding="utf-8")
+dictate.transcribe, dictate.providers.post_json = real_transcribe, real_post
+
 print("ok")

@@ -923,6 +923,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func finishRecording() {
+        let micStarted = recorder != nil  // nil: stopped before the mic had started
         timer?.invalidate()
         timer = nil
         recorder?.stop()
@@ -935,7 +936,8 @@ final class App: NSObject, NSApplicationDelegate {
         guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
             if settings.sounds { chime.nothing() }
-            return hud.flash("Didn't catch that", symbol: "waveform.slash", seconds: 1.6)
+            let why = micStarted ? "Didn't catch that" : "Microphone was still starting"
+            return hud.flash(why, symbol: "waveform.slash", seconds: 1.6)
         }
         phase = .transcribing
         if settings.sounds { chime.down() }  // the mic is already closed: not recorded

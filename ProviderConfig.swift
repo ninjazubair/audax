@@ -180,8 +180,8 @@ struct ProviderStatus {
 /// the Keychain or the .env.
 func providerStatus(_ settings: Settings, model: Model) -> ProviderStatus {
     if settings.cleanup == "off" {
-        return ProviderStatus(ok: true, detail: "Switched off in Settings: you get the raw "
-                              + "transcript.", fixTitle: "")
+        return ProviderStatus(ok: true, detail: "Switched off: you get the raw transcript.",
+                              fixTitle: "")
     }
     let env = EnvFile.values()
     let id = ProviderInfo.active(settings, env: env)

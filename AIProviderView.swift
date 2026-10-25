@@ -309,7 +309,7 @@ struct AIProviderView: View {
     }
 
     var removeTitle: String {
-        "Remove the \(removing?.label.lowercased() ?? "key") from the Keychain?"
+        "Remove “\(removing?.label ?? "API key")” from the Keychain?"
     }
 
     var hasUnsavedDraft: Bool {
@@ -578,7 +578,7 @@ extension AIProviderView {
                     Group {  // one fixed slot: every field on the screen ends at the same x
                         if stored && blank {
                             Button("Remove…", role: .destructive) { remove(secret) }
-                                .help("Delete this \(secret.label.lowercased()) from the Keychain")
+                                .help("Delete the saved “\(secret.label)” from the Keychain")
                         } else {
                             Button("Save") { save(secret) }.disabled(blank)
                         }

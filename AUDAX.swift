@@ -126,8 +126,9 @@ func runDictate(_ proc: Process, done: @escaping (Int32, Data, Data) -> Void) th
     proc.standardError = err
     proc.terminationHandler = { _ in exited.signal() }
     try proc.run()
-    DispatchQueue.main.asyncAfter(deadline: .now() + dictateTimeout) {
-        guard proc.isRunning else { return }
+    // Weak: a dictation that finished long before frees its Process and pipes now, not 450 s on.
+    DispatchQueue.main.asyncAfter(deadline: .now() + dictateTimeout) { [weak proc] in
+        guard let proc = proc, proc.isRunning else { return }
         appendToLog(["error": "dictate.py timed out"])
         terminateChildren(of: proc.processIdentifier)  // first: after it they would be orphans
         proc.terminate()

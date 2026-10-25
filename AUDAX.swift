@@ -402,12 +402,15 @@ final class App: NSObject, NSApplicationDelegate {
         model.engineOK = !needsSetup()
         model.tapOK = keyTap?.isActive ?? false
         model.globeConflict = globeKeyConflict
-        switch settings.provider {
+        switch activeProvider {
         case "ollama": checkOllama()
         case "copilot": checkGitHub()
         default: model.cleanupOK = providerStatus(settings, model: model).ok  // keys, endpoints
         }
     }
+
+    /// The provider dictations use (the .env's AUDAX_PROVIDER wins), so probes check that one.
+    var activeProvider: String { ProviderInfo.active(settings, env: EnvFile.values()) }
 
     /// Accessibility granted since the last check (a tap from before a revoke may still count as
     /// enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil first,
@@ -438,7 +441,7 @@ final class App: NSObject, NSApplicationDelegate {
             let signedIn = ghHasToken(gh)
             DispatchQueue.main.async {
                 self.model.gitHub = signedIn ? .signedIn : .signedOut
-                if self.settings.provider == "copilot" { self.model.cleanupOK = signedIn }
+                if self.activeProvider == "copilot" { self.model.cleanupOK = signedIn }
             }
         }
     }
@@ -460,7 +463,7 @@ final class App: NSObject, NSApplicationDelegate {
             let tags = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
             let ok = !name.isEmpty && tags.contains("\"\(name)")
             DispatchQueue.main.async {
-                if self.settings.provider == "ollama" { self.model.cleanupOK = ok }
+                if self.activeProvider == "ollama" { self.model.cleanupOK = ok }
             }
         }.resume()
     }
@@ -642,8 +645,9 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// A shortcut recorder (Dictation pane) pauses the hot keys so it can see (and reject) the keys pressed.
-    /// A running recording finishes first: paused, a hold would never see its release.
+    /// A shortcut recorder (Dictation pane) pauses the hot keys so it can see (and reject) the
+    /// keys pressed. A running recording finishes first: paused, a hold would never see its
+    /// release.
     func pauseHotKeys(_ paused: Bool) {
         if paused, phase == .recording { finishRecording() }
         hotKeysPaused = paused
@@ -875,7 +879,7 @@ final class App: NSObject, NSApplicationDelegate {
     /// or to load another model) and the next clean-up takes ~4 s.
     /// Local Ollama with clean-up on only: nothing is sent for another provider.
     func warmCleanupModel() {
-        guard settings.provider == "ollama", settings.cleanup != "off",
+        guard activeProvider == "ollama", settings.cleanup != "off",
               let url = URL(string: "http://127.0.0.1:11434/api/generate") else { return }
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"

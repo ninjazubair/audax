@@ -245,7 +245,7 @@ struct SetupCard: View {
     }
 
     var cleanupFix: () -> Void {
-        switch settings.provider {
+        switch ProviderInfo.active(settings, env: EnvFile.values()) {
         case "ollama": return actions.startOllama
         case "copilot": return actions.signInGitHub
         default: return { model.pane = .aiProvider }  // keys, endpoints: the provider pane
@@ -298,7 +298,7 @@ struct QuickControls: View {
     var provider: some View {
         HStack(spacing: 8) {
             Button { model.pane = .aiProvider } label: {
-                Text(ProviderInfo.name(settings.provider))
+                Text(ProviderInfo.name(providerID))
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
             }
             .buttonStyle(.link)
@@ -315,8 +315,11 @@ struct QuickControls: View {
                              "copilot/gpt-4.1": "≈2 s per dictation",
                              "copilot/gpt-6.1-sol": "≈2.7–4.9 s per dictation"]
 
+    /// The provider dictations use (the .env's AUDAX_PROVIDER wins), as the privacy line names.
+    var providerID: String { ProviderInfo.active(settings, env: EnvFile.values()) }
+
     var speedHint: String? {
-        let provider = settings.provider
+        let provider = providerID
         return Self.speedHints["\(provider)/\(settings.models[provider] ?? "")"]
     }
 

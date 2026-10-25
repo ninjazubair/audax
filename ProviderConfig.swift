@@ -20,6 +20,12 @@ enum ProviderInfo {
 
     static func name(_ id: String) -> String { all.first { $0.id == id }?.name ?? id }
 
+    /// The provider dictations use: the .env file's AUDAX_PROVIDER when set, else Settings'.
+    static func active(_ settings: Settings, env: [String: String]) -> String {
+        let id = env["AUDAX_PROVIDER"] ?? ""
+        return id.isEmpty ? settings.provider : id
+    }
+
     static func recipient(_ settings: Settings) -> String? {
         let provider = settings.provider
         return provider == "ollama" ? nil : Settings.recipients[provider] ?? name(provider)

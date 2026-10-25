@@ -84,6 +84,11 @@ AWS_KEYS_ENV = {"AWS_ACCESS_KEY_ID": "aws_access_key_id",
                 "AWS_SECRET_ACCESS_KEY": "aws_secret_access_key",
                 "AWS_SESSION_TOKEN": "aws_session_token"}
 NO_STATIC_KEYS = " - use an access key or a Bedrock API key"
+# What a failed provider call raises: network, timeout, HTTP status, bad JSON, a reply of the
+# wrong shape, no GitHub sign-in (RuntimeError, and RecursionError for JSON nested too deep).
+# dictate.CLEANUP_ERRORS is this tuple. Anything else is a bug: dictate.py exits 1.
+PROVIDER_ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError,
+                   http.client.HTTPException, RuntimeError)
 
 
 def post_json(url: str, headers: dict, body: dict, timeout: float) -> dict:
@@ -624,15 +629,16 @@ BUILDERS = {"ollama": ollama_request, "openai": openai_request, "claude": claude
 def complete(provider: str, cfg: dict, system: str, user: str, timeout: float = 20) -> str:
     """The model's answer as text. Raises on any failure; dictate.cleanup decides what then.
 
-    Copilot: the gh token is not in cfg, so the caller's redaction cannot see it. Any failure
-    once it is read (host lookup, request, reply) is raised again as a RuntimeError of its repr
-    with the token redacted: a server can echo it in a reason phrase."""
+    Copilot: the gh token is not in cfg, so the caller's redaction cannot see it. A provider
+    failure once it is read (one of PROVIDER_ERRORS: host lookup, request, reply) is raised
+    again as a RuntimeError of its repr with the token redacted: a server can echo it in a
+    reason phrase. Anything else (a bug) propagates as it is, as for the other providers."""
     if provider != "copilot":
         return send(provider, cfg, system, user, timeout)
     token = copilot_token()
     try:
         return send(provider, with_copilot_auth(cfg, token), system, user, timeout)
-    except Exception as e:
+    except PROVIDER_ERRORS as e:
         raise RuntimeError(redact(repr(e), {"api_key": token})) from None
 
 

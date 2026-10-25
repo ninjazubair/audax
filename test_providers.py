@@ -376,6 +376,12 @@ for echo in (urllib.error.HTTPError(BIZ + "/chat/completions", 401, "bad gho_t",
         assert False
     except RuntimeError as e:
         assert "gho_t" not in repr(e) and "<redacted>" in repr(e), repr(e)
+providers.post_json = raising(NameError("name 'oops' is not defined"))  # a bug, not a failure:
+try:  # not wrapped, so dictate.py exits 1 for it, as for the other providers
+    providers.complete("copilot", {"model": "m"}, "S", "U")
+    assert False
+except NameError:
+    pass
 providers.copilot_api_host = raising(OSError("host lookup quoted gho_t"))  # the GET in flight
 try:
     providers.complete("copilot", {"model": "m"}, "S", "U")

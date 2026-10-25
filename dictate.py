@@ -272,8 +272,7 @@ def ask_model(cfg: dict, system: str, user: str) -> str:
     return providers.complete(cfg.get("provider", "ollama"), cfg, system, user)
 
 
-CLEANUP_ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError,
-                  http.client.HTTPException, RuntimeError)  # RuntimeError: copilot not signed in
+CLEANUP_ERRORS = providers.PROVIDER_ERRORS  # one list: Copilot's token redaction catches the same
 
 
 def cleanup(text: str, cfg: dict) -> tuple:

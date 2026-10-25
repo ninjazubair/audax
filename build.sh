@@ -64,8 +64,11 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>$STAMP</string>
   <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
   <key>NSMicrophoneUsageDescription</key><string>AUDAX records your voice for local dictation.</string>
+  <key>NSAppSleepDisabled</key><true/>
 </dict></plist>
 EOF
+# NSAppSleepDisabled: no App Nap. Napped (priority 4 instead of 46, measured 3/3), a busy CPU
+# kept SIGTERM, SIGUSR1 and the 5 s timer waiting 15 s and more (2026-10-25 stress run).
 # No --options runtime: hardened runtime would need a mic entitlement and only matters for
 # Apple notarization, which a self-signed build cannot get anyway.
 codesign --force --sign "$IDENTITY" "$APP"

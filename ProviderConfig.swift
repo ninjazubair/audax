@@ -313,9 +313,11 @@ enum EnvFile {
     static var exists: Bool { FileManager.default.fileExists(atPath: url.path) }
     static var controlsProvider: Bool { nonEmpty(values()["AUDAX_PROVIDER"]) != nil }
 
-    /// Readable by group or others: the file usually holds keys.
+    /// Readable by group or others: the file usually holds keys. The destination's mode, not a
+    /// symlink's own (0755 when made by `ln -s`, which would always warn).
     static var tooOpen: Bool {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let path = url.resolvingSymlinksInPath().path
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         guard let mode = attrs?[.posixPermissions] as? Int else { return false }
         return mode & 0o044 != 0
     }

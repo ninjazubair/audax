@@ -36,8 +36,11 @@ struct RootView: View {
     let actions: Actions
 
     var body: some View {
-        NavigationSplitView {
+        // The sidebar always shows: it is the window's only navigation.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
             sidebar
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
         } detail: {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -68,7 +71,6 @@ struct RootView: View {
             }
             Section { row(.about) }
         }
-        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 260)
     }
 
     func row(_ pane: Pane) -> some View {
@@ -92,15 +94,23 @@ struct StatusCapsule: View {
     @ObservedObject var model: Model
 
     var body: some View {
+        if #available(macOS 26, *) {
+            label.padding(.horizontal, 6)  // the toolbar's glass is the capsule
+        } else {
+            label
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(tint.opacity(0.14), in: Capsule())
+        }
+    }
+
+    var label: some View {
         HStack(spacing: 6) {
             Circle().fill(tint).frame(width: 7, height: 7)
-            Text(label).monospacedDigit()
+            Text(text).monospacedDigit()
         }
         .font(.callout.weight(.medium))
         .foregroundStyle(model.phase == .idle ? Color.secondary : tint)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(tint.opacity(0.14), in: Capsule())
         .fixedSize()
         .accessibilityElement(children: .combine)
     }
@@ -113,7 +123,7 @@ struct StatusCapsule: View {
         }
     }
 
-    var label: String {
+    var text: String {
         switch model.phase {
         case .idle: return "Ready"
         case .recording: return "Listening \(clockText(model.seconds))"

@@ -135,7 +135,8 @@ def load_subs() -> dict:
 def apply_subs(text: str, subs: dict) -> str:
     for phrase, repl in subs.items():
         words = r"[\s-]+".join(map(re.escape, phrase.split()))  # "real time" = "real-time"
-        text = re.sub(r"\b" + words + r"\b", lambda _: repl, text, flags=re.IGNORECASE)
+        # Lookarounds, not \b: \b needs a word character, so "c++" or ".net" never matched.
+        text = re.sub(r"(?<!\w)" + words + r"(?!\w)", lambda _: repl, text, flags=re.IGNORECASE)
     return text
 
 

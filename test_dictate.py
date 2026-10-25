@@ -407,4 +407,12 @@ dictate.CLEANUP_SECONDS = 20
 Peer.slow = b""
 dictate.transcribe_cli = real_cli
 
+# Phrases that start or end with a non-word character match too; inside a word they don't.
+EDGE = {"c++": "C++", ".net": ".NET", "😀 smile": "🙂"}
+assert dictate.apply_subs("i write c++ daily on .net 😀 Smile", EDGE) == (
+    "i write C++ daily on .NET 🙂")
+assert dictate.apply_subs("abc++ and asp.netcore", EDGE) == "abc++ and asp.netcore"
+assert dictate.apply_subs("Work-Front, workfronts", {"work front": "Workfront"}) == (
+    "Workfront, workfronts")  # normal words as before: [\s-]+ joins, whole words only
+
 print("ok")

@@ -123,10 +123,8 @@ final class Chime {
         engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
-    func play(_ notes: [Double], step: Double = 0.085, length: Double = 0.22,
-              amplitude: Double = 0.28) {
-        guard let buf = render(notes, step: step, length: length, amplitude: amplitude)
-        else { return }
+    func play(_ buf: AVAudioPCMBuffer?) {
+        guard let buf = buf else { return }
         if !engine.isRunning { try? engine.start() }
         // No sound and a log line, not a crash: play() on an engine that failed to start raises an
         // Objective-C exception ("player did not see an IO cycle", seen with audio output wedged).
@@ -152,30 +150,34 @@ final class Chime {
         }
     }
 
-    func render(_ notes: [Double], step: Double, length: Double,
-                amplitude: Double) -> AVAudioPCMBuffer? {
+    /// One sine tone gliding exponentially from `from` to `to` Hz over `sweep` seconds, then
+    /// holding. Envelope: rises towards `peak` with a 40 ms time constant, and from 80 ms decays
+    /// with a 50 ms time constant; the last 10 ms taper to zero so the end does not click.
+    func glide(from: Double, to: Double, sweep: Double = 0.15, duration: Double = 0.25,
+               peak: Double = 0.12) -> AVAudioPCMBuffer? {
         let rate = format.sampleRate
-        let frames = AVAudioFrameCount((step * Double(notes.count - 1) + length) * rate)
+        let frames = AVAudioFrameCount(duration * rate)
         guard let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
         buf.frameLength = frames
         let out = buf.floatChannelData![0]
-        for i in 0..<Int(frames) { out[i] = 0 }
-        for (n, freq) in notes.enumerated() {
-            let start = Int(Double(n) * step * rate)
-            for i in 0..<Int(length * rate) where start + i < Int(frames) {
-                let t = Double(i) / rate
-                let envelope = min(1, t / 0.004) * exp(-t * 14)
-                let wave = sin(2 * .pi * freq * t) + 0.25 * sin(4 * .pi * freq * t)
-                out[start + i] += Float(amplitude * envelope * wave)
-            }
+        let atRelease = peak * (1 - exp(-0.08 / 0.04))
+        var phase = 0.0
+        for i in 0..<Int(frames) {
+            let t = Double(i) / rate
+            let freq = from * pow(to / from, min(t, sweep) / sweep)
+            phase += 2 * .pi * freq / rate
+            var gain = t < 0.08 ? peak * (1 - exp(-t / 0.04)) : atRelease * exp(-(t - 0.08) / 0.05)
+            gain *= min(1, (duration - t) / 0.01)
+            out[i] = Float(gain * sin(phase))
         }
         return buf
     }
 
-    // Rising E-B, 0.31 s; recording starts at 0.1 s.
-    func start() { play([659.3, 987.8], amplitude: 0.35) }
-    func done() { play([784.0, 1046.5], step: 0.09, length: 0.2) }  // soft G-C: text pasted
-    func nothing() { play([392.0, 293.7], step: 0.12, length: 0.25) }  // low, soft
+    // Soft pitch glides (0.25 s each), quieter than a system alert. ponytail: `peak` is a
+    // listening knob — 0.12 is a little above the 0.08 of the app the owner likes.
+    func start() { play(glide(from: 390, to: 520)) }  // up: listening; recording starts at 0.1 s
+    func stop() { play(glide(from: 520, to: 390)) }  // down: recording finished
+    func nothing() { play(glide(from: 330, to: 247, peak: 0.09)) }  // lower: nothing heard
 }
 
 /// Bar level for the pill from the recorder's level: tracks the room's noise floor so that only
@@ -738,9 +740,9 @@ final class App: NSObject, NSApplicationDelegate {
         if settings.sounds { chime.start() }
         hud.showRecording(mode: mode)
         // Start the mic 0.1 s in: later clips the first syllable of someone who talks the moment
-        // they press. So the start sound's tail falls inside the recording window (≈0.2 s);
-        // whether the warm-up skip (the first 0.25 s of readings) keeps it out of the silence
-        // check is unmeasured.
+        // they press. So the last ≈0.15 s of the 0.25 s start glide, already decaying, falls
+        // inside the recording window; whether the warm-up skip (the first 0.25 s of readings)
+        // keeps it out of the silence check is unmeasured.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             guard let self = self, self.phase == .recording else { return }
             self.startRecorder()
@@ -794,6 +796,7 @@ final class App: NSObject, NSApplicationDelegate {
             return hud.flash("Didn't catch that", symbol: "waveform.slash", seconds: 1.6)
         }
         phase = .transcribing
+        if settings.sounds { chime.stop() }  // the mic is already closed: not recorded
         hud.showTranscribing()
         runDictateScript()
     }
@@ -853,7 +856,6 @@ final class App: NSObject, NSApplicationDelegate {
             return hud.flash("Something went wrong: see log",
                              symbol: "exclamationmark.triangle.fill", seconds: 1.6)
         }
-        if settings.sounds { chime.done() }
         deliver(text, skipped: result?["cleanup"] as? String == "skipped")
     }
 

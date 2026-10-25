@@ -103,7 +103,8 @@ final class Settings: ObservableObject {
         handsFreeKey = Settings.shortcut(d.data(forKey: "handsFreeKey")) ?? .handsFreeDefault
         language = d.string(forKey: "language") ?? "en"
         cleanup = Settings.storedCleanup(d.object(forKey: "cleanup"))
-        sounds = d.object(forKey: "sounds") as? Bool ?? true
+        // bool(forKey:), not `as? Bool`: a launch argument (-sounds NO) arrives as the string "NO".
+        sounds = d.object(forKey: "sounds") == nil ? true : d.bool(forKey: "sounds")
         provider = d.string(forKey: "provider") ?? "ollama"
         let stored = d.dictionary(forKey: "models") as? [String: String] ?? [:]
         models = Settings.migrateCopilotDefault(Settings.defaultModels.merging(stored) { $1 })

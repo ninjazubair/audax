@@ -401,7 +401,8 @@ Peer.raw, Peer.slow = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n", b'{"mes
 dictate.CLEANUP_SECONDS = 1
 t0 = time.monotonic()  # the real path: cleanup, providers.complete, post_json, urlopen
 got = dictate.cleanup("um hello", {**dictate.DEFAULT_CONFIG, "url": PEER + "/api/chat"})
-assert got[:2] == ("um hello", "skipped") and "timeout" in got[2], got
+assert got[:2] == ("um hello", "skipped"), got
+assert "timeout" in got[2] or "TimeoutError" in got[2], got  # 3.10+: socket.timeout's new repr
 assert time.monotonic() - t0 < 2.5, time.monotonic() - t0
 dictate.CLEANUP_SECONDS = 20
 Peer.slow = b""

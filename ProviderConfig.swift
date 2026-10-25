@@ -50,7 +50,8 @@ enum ProviderInfo {
         case "openai": return "OpenAI"
         case "bedrock": return "Amazon Bedrock"
         case "foundry": return "Microsoft Foundry"
-        default:  // the two gateways, and an id the .env names that AUDAX does not know
+        case let id where !known(id): return nil  // an id from the .env: clean-up is skipped
+        default:  // the two gateways
             return URL(string: cfg["base_url"] ?? "")?.host ?? "the server at your base URL"
         }
     }
@@ -162,8 +163,8 @@ enum ProviderInfo {
         case "copilot":
             return "gpt-4.1 ≈2 s, gpt-6.1-sol ≈2.7–4.9 s per dictation, measured on the "
                 + "developer's Mac."
-        default: return "Not measured yet: it depends on the model and region. Test connection "
-            + "shows one round trip."
+        default: return "Not measured yet: it depends on the model and where it runs. Test "
+            + "connection shows one round trip."
         }
     }
 }
@@ -232,50 +233,64 @@ enum EnvFile {
         return parse(text)
     }
 
-    /// The .env grammar shared with providers.load_env_file:
-    /// - UTF-8, a leading BOM ignored; lines end in LF, CRLF or CR.
-    /// - Blank lines and lines whose first non-blank character is # are skipped.
-    /// - "export" followed by spaces or tabs is dropped from the start of a line.
-    /// - KEY=VALUE splits at the first "="; spaces around both are dropped; no "=" or an empty
-    ///   key: the line is skipped.
-    /// - A value that starts with ' or " runs to the next same quote, which is stripped with
-    ///   it; whatever follows is ignored. No closing quote: read as unquoted.
-    /// - Unquoted: a # after a space or tab starts a comment (so `A= # note` is empty, and
-    ///   `A=pa#ss` keeps its #).
+    /// The .env grammar shared with providers.load_env_file (env_line, env_value), step by step:
+    /// - UTF-8, one leading BOM dropped; lines end at LF, CRLF or CR. Blanks are space and tab.
+    /// - A line is trimmed of blanks; one that starts with # is a comment.
+    /// - "export" plus blanks is dropped from its start; then KEY=VALUE splits at the first "=",
+    ///   both trimmed. No "=" or an empty key: the line is ignored.
+    /// - A VALUE in ' or " runs to the next same quote; after it only blanks or a # comment may
+    ///   follow. Anything else after it, or no closing quote: the line is ignored.
+    /// - Unquoted: it ends before the first blank followed by #, trimmed. So `A=pa#ss` keeps
+    ///   its #, and so does `A= # note` (the value is "# note": the blank goes with the "=").
     /// - No escapes, no variable expansion. A repeated key: the last one wins.
     static func parse(_ text: String) -> [String: String] {
         let body = text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text
         var env: [String: String] = [:]
-        for line in body.components(separatedBy: .newlines) {
+        let lines = body.split(omittingEmptySubsequences: false) {
+            $0 == "\n" || $0 == "\r" || $0 == "\r\n"  // CRLF is one Character in Swift
+        }
+        for line in lines {
             if let (key, value) = pair(line) { env[key] = value }
         }
         return env
     }
 
-    static func pair(_ raw: String) -> (String, String)? {
-        var line = Substring(raw.trimmingCharacters(in: .whitespaces))
-        let blank: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+    static func blank(_ c: Character) -> Bool { c == " " || c == "\t" }
+
+    static func trim(_ text: Substring) -> Substring {
+        guard let first = text.firstIndex(where: { !blank($0) }),
+              let last = text.lastIndex(where: { !blank($0) }) else { return "" }
+        return text[first...last]
+    }
+
+    static func pair(_ raw: Substring) -> (String, String)? {
+        var line = trim(raw)
+        if line.hasPrefix("#") { return nil }
         if line.hasPrefix("export"), let next = line.dropFirst(6).first, blank(next) {
             line = line.dropFirst(6).drop(while: blank)
         }
-        guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { return nil }
-        let key = line[..<eq].trimmingCharacters(in: .whitespaces)
-        return key.isEmpty ? nil : (key, value(line[line.index(after: eq)...]))
+        guard let eq = line.firstIndex(of: "=") else { return nil }
+        let key = trim(line[..<eq])
+        guard !key.isEmpty, let value = value(trim(line[line.index(after: eq)...])) else {
+            return nil
+        }
+        return (String(key), value)
     }
 
-    /// The text after "=", as `parse` describes.
-    static func value(_ rest: Substring) -> String {
-        let text = rest.drop { $0 == " " || $0 == "\t" }
-        if let quote = text.first, quote == "\"" || quote == "'",
-           let end = text.dropFirst().firstIndex(of: quote) {
+    /// A trimmed VALUE as `parse` reads it; nil when the line is to be ignored.
+    static func value(_ text: Substring) -> String? {
+        if let quote = text.first, quote == "\"" || quote == "'" {
+            guard let end = text.dropFirst().firstIndex(of: quote) else { return nil }
+            let rest = text[text.index(after: end)...].drop(while: blank)
+            guard rest.isEmpty || rest.hasPrefix("#") else { return nil }
             return String(text[text.index(after: text.startIndex)..<end])
         }
-        var previous: Character = "="  // a # straight after "=" is part of the value
-        let comment = rest.firstIndex { c in
+        var previous: Character = "x"  // a # first in the value is part of it
+        let comment = text.firstIndex { c in
             defer { previous = c }
-            return c == "#" && (previous == " " || previous == "\t")
+            return c == "#" && blank(previous)
         }
-        return rest[..<(comment ?? rest.endIndex)].trimmingCharacters(in: .whitespaces)
+        return String(trim(text[..<(comment ?? text.endIndex)]))
     }
 
     static func nonEmpty(_ value: String?) -> String? {
@@ -321,10 +336,12 @@ enum EnvFile {
         let provider = out["provider"] ?? ""
         put(perProvider[provider] ?? [])
         guard provider == "bedrock" else { return out }
+        let keyNames = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]  // a lone session token: no
+        let keys = keyNames.contains { nonEmpty(env[$0]) != nil }
         if let token = nonEmpty(env["AWS_BEARER_TOKEN_BEDROCK"]) {
             out["api_key"] = token
             out["aws_auth"] = "api_key"
-        } else if awsKeys.contains(where: { nonEmpty(env[$0.0]) != nil }) {
+        } else if keys {
             // One unit from one source: an ID from the file never pairs with a saved secret.
             for (name, field) in awsKeys { out[field] = nonEmpty(env[name]) ?? "" }
             out["aws_auth"] = "access_key"
@@ -342,10 +359,15 @@ enum EnvFile {
         "aws_session_token": "session token", "aws_profile": "AWS profile",
         "aws_auth": "sign-in method"]
 
-    /// What the .env sets for provider `id`, as the screen names it, in config-key order.
-    static func setFields(for id: String, env: [String: String]) -> [String] {
+    /// The config keys the .env sets for provider `id`, in config-key order.
+    static func setKeys(for id: String, env: [String: String]) -> [String] {
         let set = overlay(["provider": id], env.filter { $0.key != "AUDAX_PROVIDER" })
-        return ProviderInfo.configKeys.compactMap { set[$0] == nil ? nil : fieldNames[$0] }
+        return ProviderInfo.configKeys.filter { $0 != "provider" && set[$0] != nil }
+    }
+
+    /// The same, as the screen names them.
+    static func setFields(for id: String, env: [String: String]) -> [String] {
+        setKeys(for: id, env: env).compactMap { fieldNames[$0] }
     }
 
     /// Creates the commented template (0600, folder 0700) only when no file exists, then opens

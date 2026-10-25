@@ -164,14 +164,15 @@ final class Chime {
     // Soft pitch glides, 0.25 s each. ponytail: `peak` is a listening knob — 0.12 is a little
     // above the 0.08 of the app the owner likes.
     let startWAV = Chime.wav(Chime.glide(from: 390, to: 520))  // up: listening
-    let stopWAV = Chime.wav(Chime.glide(from: 520, to: 390))  // down: recording finished
+    let downWAV = Chime.wav(Chime.glide(from: 520, to: 390))  // down: recording finished
     let nothingWAV = Chime.wav(Chime.glide(from: 330, to: 247, peak: 0.09))  // lower: nothing
     var started: NSSound?  // the last start sound, so a cancelled recording can cut it short
     var playing: [NSSound] = []  // keeps the last few alive while they play; bounded, no leak
     var warned = false  // "sound did not play", logged once per dictation (beginRecording resets)
 
     func start() { started = play(startWAV) }  // recording starts 0.1 s in
-    func stop() { play(stopWAV) }
+    // Plays the down glide. Not `stop`: `started?.stop()` is NSSound's, and silences a sound.
+    func down() { play(downWAV) }
     func nothing() { play(nothingWAV) }
 
     @discardableResult
@@ -931,7 +932,7 @@ final class App: NSObject, NSApplicationDelegate {
             return hud.flash("Didn't catch that", symbol: "waveform.slash", seconds: 1.6)
         }
         phase = .transcribing
-        if settings.sounds { chime.stop() }  // the mic is already closed: not recorded
+        if settings.sounds { chime.down() }  // the mic is already closed: not recorded
         hud.showTranscribing()
         runDictateScript()
     }

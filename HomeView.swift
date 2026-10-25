@@ -113,7 +113,7 @@ struct HomeView: View {
             Text("Try it here").font(.headline)
             TextEditor(text: $model.scratch)
                 .focused($tryBoxFocused)
-                .onAppear { tryBoxFocused = true }  // open AUDAX, hold the talk key, talk
+                .onAppear(perform: focusOnOpen)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(6)
@@ -129,6 +129,14 @@ struct HomeView: View {
                 .foregroundStyle(.secondary)
         }
         .card()
+    }
+
+    /// Open AUDAX, hold the talk key, talk: the first Home after the window opens focuses the
+    /// box. Coming back to Home from another pane leaves the focus alone.
+    func focusOnOpen() {
+        guard model.focusTryBox else { return }
+        model.focusTryBox = false
+        tryBoxFocused = true
     }
 
     @ViewBuilder var placeholder: some View {
@@ -195,7 +203,9 @@ struct SetupCard: View {
         HStack(spacing: 8) {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 .accessibilityHidden(true)
-            Text("All set: microphone, pasting, speech engine and clean-up are ready.")
+            Text(settings.cleanup == "off"
+                 ? "All set: microphone, pasting and speech engine are ready; clean-up is off."
+                 : "All set: microphone, pasting, speech engine and clean-up are ready.")
         }
         .font(.callout)
         .card(padding: 12)

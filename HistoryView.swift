@@ -127,7 +127,7 @@ struct HistoryRow: View {
                     .textSelection(.enabled)  // drag to copy part of it
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if !item.caption.isEmpty {
-                    Text(item.caption).font(.caption).foregroundStyle(.tertiary)
+                    Text(item.caption).font(.caption).foregroundStyle(.secondary)
                 }
             }
             VStack(alignment: .trailing, spacing: 4) {

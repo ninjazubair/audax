@@ -189,9 +189,13 @@ func providerStatus(_ settings: Settings, model: Model) -> ProviderStatus {
                                      stored: { Keychain.has(account: $0) })
     let name = ProviderInfo.name(id), modelName = cfg["model"] ?? ""
     switch id {
+    case "ollama" where !model.cleanupOK:
+        let missing = modelName.isEmpty ? "no model is set" : "\(modelName) is missing"
+        return ProviderStatus(ok: false, detail: "Ollama is not running or \(missing).",
+                              fixTitle: "Start Ollama")
     case "ollama":
-        return ProviderStatus(ok: model.cleanupOK, detail: "Local Ollama with \(modelName): "
-                              + "punctuation, fillers, corrections.", fixTitle: "Start Ollama")
+        return ProviderStatus(ok: true, detail: "Local Ollama with \(modelName): "
+                              + "punctuation, fillers, corrections.", fixTitle: "")
     case "copilot" where model.gitHub == .noCLI:
         return ProviderStatus(ok: false, detail: "GitHub CLI not found. Install it with: brew "
                               + "install gh", fixTitle: "")

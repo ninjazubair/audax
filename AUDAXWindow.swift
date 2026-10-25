@@ -26,6 +26,7 @@ final class Model: ObservableObject {
     @Published var scratch = ""
     @Published var pane = Pane.home  // the window's sidebar selection
     @Published var seconds = 0  // whole seconds of the current recording, for the toolbar
+    var focusTryBox = true  // launch, or the window opened on another pane; Home clears it
 
     var ready: Bool { micOK && pasteOK && engineOK }
 }

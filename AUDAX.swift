@@ -360,6 +360,9 @@ final class App: NSObject, NSApplicationDelegate {
     @objc func showWindow() {
         refreshChecks()
         model.recent = loadRecent()
+        // Opening on another pane: the next Home focuses the Try-it box. Reopening on Home fires
+        // no onAppear (probed); the window keeps the first responder it had.
+        if !windowOnScreen && model.pane != .home { model.focusTryBox = true }
         mainWindow.show()
     }
 

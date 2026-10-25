@@ -13,7 +13,7 @@ struct DictationSettingsView: View {
             Section("Sound") {
                 Toggle(isOn: $settings.sounds) {
                     Text("Sounds")
-                    Text("A soft chime when recording starts and when the text is pasted.")
+                    Text("A short sound when a recording starts and when it ends.")
                 }
             }
             Section("Language and clean-up") { languageAndCleanup }

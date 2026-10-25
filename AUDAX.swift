@@ -228,7 +228,7 @@ final class App: NSObject, NSApplicationDelegate {
     let whisperServer = WhisperServer(binary: whisperServerBinary, model: modelPath,
                                       port: whisperServerPort)
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
-    var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
+    var hotKeysPaused = false  // while a shortcut recorder listens for new keys
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
     var axTrusted = AXIsProcessTrusted()  // Accessibility at the last idle check: a grant renews
     var usr1: DispatchSourceSignal?
@@ -393,7 +393,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The windows' check rows; also renews the Fn tap. The timer runs it only while a window
+    /// The window's check rows; also renews the Fn tap. The timer runs it only while the window
     /// shows, and renewKeyTap alone otherwise.
     func refreshChecks() {
         renewKeyTap()
@@ -642,7 +642,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// A Settings recorder pauses the hot keys so it can see (and reject) the keys pressed.
+    /// A shortcut recorder (Dictation pane) pauses the hot keys so it can see (and reject) the keys pressed.
     /// A running recording finishes first: paused, a hold would never see its release.
     func pauseHotKeys(_ paused: Bool) {
         if paused, phase == .recording { finishRecording() }

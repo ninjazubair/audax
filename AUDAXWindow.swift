@@ -226,6 +226,8 @@ func logCaption(_ entry: [String: Any]) -> String {
     if let stt = entry["stt_s"] as? Double { parts.append(String(format: "speech %.2f s", stt)) }
     if entry["level"] as? String == "off" {
         parts.append("clean-up off")
+    } else if entry["cleanup"] as? String == "skipped" {  // failed: pasted as heard
+        parts.append("clean-up skipped")
     } else if let llm = entry["llm_s"] as? Double {
         parts.append(String(format: "clean-up %.2f s", llm))
     }

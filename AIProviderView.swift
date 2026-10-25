@@ -163,14 +163,24 @@ struct AIProviderView: View {
         }
     }
 
+    /// App probes gh and Ollama only for the provider dictations use. Another tile (the .env
+    /// selects a different provider) has no answer in `model`: this says so instead.
+    var notChecked: String? {
+        activeID == id ? nil : "Not checked: dictations use \(ProviderInfo.name(activeID))"
+    }
+
     var gitHubRow: some View {
         LabeledContent("GitHub") {
-            HStack(spacing: 8) {
-                StatusText(ok: model.gitHub == .signedIn,
-                           text: Self.gitHubCaptions[model.gitHub] ?? "")
-                if model.gitHub != .signedIn {
-                    Button("Sign in…", action: actions.signInGitHub)
-                        .disabled(model.gitHub == .noCLI)
+            if let note = notChecked {
+                Text(note).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    StatusText(ok: model.gitHub == .signedIn,
+                               text: Self.gitHubCaptions[model.gitHub] ?? "")
+                    if model.gitHub != .signedIn {
+                        Button("Sign in…", action: actions.signInGitHub)
+                            .disabled(model.gitHub == .noCLI)
+                    }
                 }
             }
         }
@@ -179,10 +189,14 @@ struct AIProviderView: View {
     var ollamaRow: some View {
         let name = cfg["model"] ?? ""  // what the probe checks: the .env's AUDAX_MODEL wins
         return LabeledContent("Ollama") {
-            HStack(spacing: 8) {
-                StatusText(ok: model.cleanupOK, text: model.cleanupOK ? "Running with \(name)"
-                           : "Not running, or \(name) is not downloaded")
-                if !model.cleanupOK { Button("Open Ollama", action: actions.startOllama) }
+            if let note = notChecked {
+                Text(note).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 8) {
+                    StatusText(ok: model.cleanupOK, text: model.cleanupOK ? "Running with \(name)"
+                               : "Not running, or \(name) is not downloaded")
+                    if !model.cleanupOK { Button("Open Ollama", action: actions.startOllama) }
+                }
             }
         }
     }

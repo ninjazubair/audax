@@ -315,6 +315,8 @@ struct VoiceMeter {
     }
 }
 
+/// One JSON line, written with O_APPEND: the kernel puts it at the end at write time, so it
+/// never overwrites a line dictate.py appends at the same moment (a seek, then a write, could).
 func appendToLog(_ entry: [String: Any]) {
     var e = entry
     let stamp = DateFormatter()
@@ -323,13 +325,10 @@ func appendToLog(_ entry: [String: Any]) {
     e["at"] = stamp.string(from: Date())
     guard let data = try? JSONSerialization.data(withJSONObject: e),
           let line = String(data: data, encoding: .utf8) else { return }
-    if let h = FileHandle(forWritingAtPath: logPath) {
-        h.seekToEndOfFile()
-        h.write(Data((line + "\n").utf8))
-        h.closeFile()
-    } else {
-        try? (line + "\n").write(toFile: logPath, atomically: true, encoding: .utf8)
-    }
+    let fd = open(logPath, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+    guard fd >= 0 else { return }
+    let log = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+    try? log.write(contentsOf: Data((line + "\n").utf8))  // throws, never raises
 }
 
 final class App: NSObject, NSApplicationDelegate {

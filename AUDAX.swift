@@ -221,16 +221,23 @@ final class Chime {
 }
 
 /// Starts the microphone off the main thread. AVAudioRecorder.record() waits for the input
-/// device's first IO cycle; on a stuck CoreAudio device that wait never ends, and on the main
-/// thread it took the hot keys, SIGUSR1 and SIGTERM with it. Here it blocks only `queue`.
+/// device's first IO cycle; on a stuck CoreAudio device it waited about 15 s, then returned
+/// false (15.07–15.79 s, 49 of 49 starts, 2026-10-25). On the main thread that wait took the hot
+/// keys, SIGUSR1 and SIGTERM with it. Here it blocks only `queue`.
 final class Mic {
     private let queue = DispatchQueue(label: "local.audax.mic")
+    private let lock = NSLock()
+    private var wanted = 0  // `lock`: the recording whose start may still run; 0 once it ended
     private var started: AVAudioRecorder?  // `queue` only: the last recorder that started
     private var wrecks: [AVAudioRecorder] = []  // `queue` only: see keepWreck
 
     /// `done` runs on the main queue with the running recorder, or nil when it did not start.
-    func start(_ done: @escaping (AVAudioRecorder?) -> Void) {
+    /// A start whose recording `id` has ended by the time the queue reaches it is skipped,
+    /// with no callback: queued behind a stuck start, it would open the mic for nobody.
+    func start(_ id: Int, _ done: @escaping (AVAudioRecorder?) -> Void) {
+        lock.withLock { wanted = id }
         queue.async {
+            guard self.lock.withLock({ self.wanted == id }) else { return }
             let format: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
                 AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false]
@@ -261,10 +268,12 @@ final class Mic {
         DispatchQueue.main.async { appendToLog(entry) }
     }
 
-    /// Every recording ends with this. It stops a recorder whose start returned too late for
-    /// that recording (main stops the one it took). Queued behind that start, it runs before any
-    /// later start, so two recorders never write rec.wav at once.
+    /// Every recording ends with this. A start still queued for it is skipped. It stops a
+    /// recorder whose start returned too late for that recording (main stops the one it took).
+    /// Queued behind that start, it runs before any later start, so two recorders never write
+    /// rec.wav at once.
     func abandon() {
+        lock.withLock { wanted = 0 }
         queue.async {
             if self.started?.isRecording == true { self.started?.stop() }  // main's is stopped
             self.started = nil
@@ -853,7 +862,7 @@ final class App: NSObject, NSApplicationDelegate {
     /// The mic starts on Mic's queue. Its answer, or micStartTimeout, whichever comes first,
     /// decides; the other finds the recording gone or no longer waiting and does nothing.
     func startRecorder(_ id: Int) {
-        mic.start { [weak self] rec in self?.recorderStarted(rec, id: id) }
+        mic.start(id) { [weak self] rec in self?.recorderStarted(rec, id: id) }
         DispatchQueue.main.asyncAfter(deadline: .now() + micStartTimeout) { [weak self] in
             guard let self = self, self.waitingForMic(id) else { return }
             self.micFailed("microphone did not start within \(micStartTimeout) s")

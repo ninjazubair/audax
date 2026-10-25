@@ -882,6 +882,10 @@ assert run_test_cli(GW) == {"ok": False, "error": "<HTTPError 401: 'x'>"}
 providers.post_json = raising(OSError("refused for " + KEY))  # an error that quotes the key
 got = run_test_cli(GW)
 assert got["ok"] is False and "<redacted>" in got["error"], got
+# A placeholder under 4 characters is no secret: replacing it would garble the error text.
+for short in ("1", "x", " 40 ", "abc"):
+    assert providers.redact("HTTP 401 for abc", {"api_key": short}) == "HTTP 401 for abc", short
+assert providers.redact("HTTP 401 for abcd", {"api_key": " abcd "}) == "HTTP 401 for <redacted>"
 assert run_test_cli(json.dumps({"provider": "foundry"})) == {
     "ok": False, "error": "ValueError('foundry: base_url is not set')"}
 for bad in ("not json", ""):

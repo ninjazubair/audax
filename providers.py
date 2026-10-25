@@ -649,10 +649,12 @@ def send(provider: str, cfg: dict, system: str, user: str, timeout: float) -> st
 
 
 def redact(message: str, cfg: dict) -> str:
-    """message with every secret value of cfg replaced: a second guard behind clean_secret."""
+    """message with every secret value of cfg replaced: a second guard behind clean_secret.
+    Values under 4 characters are left alone: a placeholder key ("x", "1") is no secret, and
+    replacing it would garble the text ("401" would read "40<redacted>")."""
     for field in SECRET_FIELDS:
         value = text(cfg, field)
-        if value:
+        if len(value) >= 4:
             message = message.replace(value, "<redacted>")
     return message
 

@@ -50,6 +50,9 @@ struct Actions {
     let pauseHotKeys: (Bool) -> Void  // true while a shortcut recorder listens
     let openKeyboardSettings: () -> Void
     let fetchCopilotModels: (@escaping ([CopilotModel]) -> Void) -> Void  // App's; [] = failed
+    // TEMP (lane U2 compile only; lane U1 adds the real fields and App wires them).
+    var testConnection: (@escaping (String) -> Void) -> Void = { $0("Not wired yet") }
+    var openEnvFile: () -> Void = { EnvFile.openOrCreateTemplate() }
 }
 
 struct CheckRow: View {

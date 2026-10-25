@@ -80,6 +80,35 @@ func copilotModels(script: String) -> [CopilotModel] {
     }
 }
 
+/// `providers.py --test`: one tiny clean-up request with `config` (dictate.py's stdin, so it
+/// carries the API key: stdin only, never argv, env or the log). "OK (N ms)" or the error text.
+/// Blocks up to 25 s: call it off the main thread.
+func providerTest(script: String, config: Data) -> String {
+    let proc = Process(), input = Pipe(), out = Pipe(), done = DispatchSemaphore(value: 0)
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    proc.arguments = ["-B", "-X", "utf8", script, "--test"]
+    // Written before launch, as for dictate.py: the pipe buffers it (a few hundred bytes).
+    input.fileHandleForWriting.write(config)
+    input.fileHandleForWriting.closeFile()
+    proc.standardInput = input
+    proc.standardOutput = out
+    proc.standardError = FileHandle.nullDevice
+    proc.terminationHandler = { _ in done.signal() }
+    guard (try? proc.run()) != nil else { return "Could not start providers.py" }
+    guard done.wait(timeout: .now() + 25) == .success else {
+        proc.terminate()
+        return "No answer within 25 s"
+    }
+    return testResultText(out.fileHandleForReading.readDataToEndOfFile())
+}
+
+/// providers.py --test prints one line: {"ok": true, "ms": N} or {"ok": false, "error": "…"}.
+func testResultText(_ data: Data) -> String {
+    let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    if reply?["ok"] as? Bool == true { return "OK (\(reply?["ms"] as? Int ?? 0) ms)" }
+    return reply?["error"] as? String ?? "No result from providers.py"
+}
+
 /// Short generated chimes, independent of the alert-volume slider. The audio engine runs only
 /// while a chime plays, so the speakers are not held open (and idle sleep not blocked) all day.
 final class Chime {
@@ -149,93 +178,6 @@ final class Chime {
     func nothing() { play([392.0, 293.7], step: 0.12, length: 0.25) }  // low, soft
 }
 
-/// Floating pill: pulsing red dot = recording; bars move only when a voice is heard.
-final class Pill: NSView {
-    var levels = [CGFloat](repeating: 0, count: 24)
-    var label = ""
-    var pulse: CGFloat = 1
-
-    override func draw(_ dirtyRect: NSRect) {
-        NSColor(white: 0.08, alpha: 0.92).setFill()
-        let r = bounds.height / 2
-        NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r).fill()
-        if label.isEmpty { drawMeter() } else { drawLabel() }
-    }
-
-    func drawLabel() {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: NSColor.white]
-        let size = label.size(withAttributes: attrs)
-        label.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
-                   withAttributes: attrs)
-    }
-
-    func drawMeter() {
-        NSColor.systemRed.withAlphaComponent(0.45 + 0.55 * pulse).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 16, y: bounds.midY - 5, width: 10, height: 10)).fill()
-        let barWidth: CGFloat = 3, gap: CGFloat = 3
-        var x: CGFloat = 38
-        for level in levels {
-            let h = 3 + level * (bounds.height - 17)
-            (level > 0.02 ? NSColor.white : NSColor(white: 1, alpha: 0.3)).setFill()
-            NSBezierPath(roundedRect: NSRect(x: x, y: bounds.midY - h / 2, width: barWidth, height: h),
-                         xRadius: 1.5, yRadius: 1.5).fill()
-            x += barWidth + gap
-        }
-    }
-}
-
-final class HUD {
-    let pill = Pill()
-    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 42),
-                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
-    var hideWork: DispatchWorkItem?
-
-    init() {
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.level = .statusBar
-        panel.ignoresMouseEvents = true  // never takes focus from the app being typed into
-        panel.hidesOnDeactivate = false  // NSPanel's default hides it when AUDAX is not in front
-        panel.canHide = false  // ⌘H on AUDAX leaves the pill up
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        panel.isExcludedFromWindowsMenu = true  // the Window menu lists AUDAX's real windows only
-        panel.contentView = pill
-    }
-
-    func show(_ label: String = "") {
-        hideWork?.cancel()
-        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        let textWidth = label.size(withAttributes: [.font: font]).width + 44
-        let width = label.isEmpty ? 200 : max(200, textWidth)
-        if let f = NSScreen.main?.visibleFrame {
-            panel.setFrame(NSRect(x: f.midX - width / 2, y: f.minY + 48, width: width, height: 42),
-                           display: false)
-        }
-        pill.label = label
-        pill.levels = pill.levels.map { _ in 0 }
-        pill.needsDisplay = true
-        panel.orderFrontRegardless()
-    }
-
-    func meter(_ level: CGFloat, pulse: CGFloat) {
-        pill.levels.removeFirst()
-        pill.levels.append(level)
-        pill.pulse = pulse
-        pill.needsDisplay = true
-    }
-
-    func flash(_ label: String, seconds: Double = 1.6) {
-        show(label)
-        let work = DispatchWorkItem { [weak self] in self?.hide() }
-        hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
-    }
-
-    func hide() { panel.orderOut(nil) }
-}
-
 /// Bar level for the pill from the recorder's level: tracks the room's noise floor so that only
 /// sound clearly above it moves the bars.
 struct VoiceMeter {
@@ -286,7 +228,7 @@ final class App: NSObject, NSApplicationDelegate {
     let whisperServer = WhisperServer(binary: whisperServerBinary, model: modelPath,
                                       port: whisperServerPort)
     var hotKeys: [EventHotKeyRef?] = []  // the Carbon registrations, to drop on re-register
-    var hotKeysPaused = false  // while a Settings recorder listens for a new shortcut
+    var hotKeysPaused = false  // while a shortcut recorder listens for new keys
     var keyTap: KeyTap?  // Fn shortcuts; nil until Accessibility is granted
     var axTrusted = AXIsProcessTrusted()  // Accessibility at the last idle check: a grant renews
     var usr1: DispatchSourceSignal?
@@ -313,9 +255,10 @@ final class App: NSObject, NSApplicationDelegate {
             let pane = "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
             if let url = URL(string: pane) { NSWorkspace.shared.open(url) }
         },
-        fetchCopilotModels: { [unowned self] in self.fetchCopilotModels($0) })
+        fetchCopilotModels: { [unowned self] in self.fetchCopilotModels($0) },
+        testConnection: { [unowned self] in self.testConnection($0) },
+        openEnvFile: { EnvFile.openOrCreateTemplate() })
     lazy var mainWindow = MainWindow(model: model, settings: settings, actions: actions)
-    var settingsWindow: SettingsWindow?  // made on first open, so windowOnScreen never makes it
     var checkTimer: Timer?
     var keepAliveTimer: Timer?  // keeps the local clean-up model loaded while AUDAX runs
     var lastGitHubProbe = Date.distantPast  // the gh probe runs at most every 30 s
@@ -416,17 +359,29 @@ final class App: NSObject, NSApplicationDelegate {
         mainWindow.show()
     }
 
+    /// ⌘, and the Settings… items: the window on Dictation.
     @objc func showSettings() {
-        let window = settingsWindow ?? SettingsWindow(settings: settings, model: model,
-                                                      actions: actions)
-        settingsWindow = window
-        window.show()
-        refreshChecks()  // the timer skipped the probes while no window showed
+        model.pane = .dictation
+        showWindow()
     }
 
-    /// The main or the Settings window is on screen: open, not minimised, AUDAX not hidden.
-    var windowOnScreen: Bool {
-        mainWindow.window.isVisible || settingsWindow?.window.isVisible == true
+    @objc func showAbout() {
+        model.pane = .about
+        showWindow()
+    }
+
+    /// The window is on screen: open, not minimised, AUDAX not hidden.
+    var windowOnScreen: Bool { mainWindow.window.isVisible }
+
+    /// For the AI Provider pane's Test connection: the request on a background queue, the
+    /// answer on main. The config is built here, on main (it reads the Keychain).
+    func testConnection(_ completion: @escaping (String) -> Void) {
+        let script = Bundle.main.path(forResource: "providers", ofType: "py") ?? ""
+        let config = configJSON()
+        DispatchQueue.global().async {
+            let result = providerTest(script: script, config: config)
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     /// For the Settings model picker: the list on a background queue, the completion on main.
@@ -438,7 +393,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The windows' check rows; also renews the Fn tap. The timer runs it only while a window
+    /// The window's check rows; also renews the Fn tap. The timer runs it only while the window
     /// shows, and renewKeyTap alone otherwise.
     func refreshChecks() {
         renewKeyTap()
@@ -447,12 +402,15 @@ final class App: NSObject, NSApplicationDelegate {
         model.engineOK = !needsSetup()
         model.tapOK = keyTap?.isActive ?? false
         model.globeConflict = globeKeyConflict
-        switch settings.provider {
+        switch activeProvider {
         case "ollama": checkOllama()
         case "copilot": checkGitHub()
-        default: model.cleanupOK = Keychain.has(account: settings.provider)  // claude, openai
+        default: model.cleanupOK = providerStatus(settings, model: model).ok  // keys, endpoints
         }
     }
+
+    /// The provider dictations use (the .env's AUDAX_PROVIDER wins), so probes check that one.
+    var activeProvider: String { ProviderInfo.active(settings, env: EnvFile.values()) }
 
     /// Accessibility granted since the last check (a tap from before a revoke may still count as
     /// enabled, yet sees no keys), or no tap, or a disabled one: a new tap. keyTap = nil first,
@@ -483,7 +441,7 @@ final class App: NSObject, NSApplicationDelegate {
             let signedIn = ghHasToken(gh)
             DispatchQueue.main.async {
                 self.model.gitHub = signedIn ? .signedIn : .signedOut
-                if self.settings.provider == "copilot" { self.model.cleanupOK = signedIn }
+                if self.activeProvider == "copilot" { self.model.cleanupOK = signedIn }
             }
         }
     }
@@ -505,7 +463,7 @@ final class App: NSObject, NSApplicationDelegate {
             let tags = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
             let ok = !name.isEmpty && tags.contains("\"\(name)")
             DispatchQueue.main.async {
-                if self.settings.provider == "ollama" { self.model.cleanupOK = ok }
+                if self.activeProvider == "ollama" { self.model.cleanupOK = ok }
             }
         }.resume()
     }
@@ -576,20 +534,16 @@ final class App: NSObject, NSApplicationDelegate {
 
     func buildMenu() {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open AUDAX…", action: #selector(showWindow),
+        menu.addItem(NSMenuItem(title: "Open AUDAX", action: #selector(showWindow),
                                 keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
-                                keyEquivalent: ","))
         // toggle(): starts hands-free when idle, finishes a recording. Shown with the hands-free
         // key, which does the same except during a hold (there it locks hands-free).
         let handsFree = settings.handsFreeKey.display
         menu.addItem(NSMenuItem(title: "Start / stop dictation   \(handsFree)",
                                 action: #selector(toggle), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(showSettings),
+                                keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Open dictation log", action: #selector(openLog),
-                                keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Allow pasting (Accessibility)…",
-                                action: #selector(openAccessibility), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Run setup again…", action: #selector(runSetup),
                                 keyEquivalent: ""))
         menu.items.forEach { $0.target = self }
         menu.addItem(.separator())
@@ -639,15 +593,6 @@ final class App: NSObject, NSApplicationDelegate {
         }
         NSApp.mainMenu = bar
         NSApp.windowsMenu = windows  // AppKit lists the open windows here
-    }
-
-    /// "Version 0.3.1 (20261024-121737)": the bundle's short version (build.sh, from VERSION),
-    /// then its build stamp in parentheses. Named explicitly, not left to AppKit's defaults.
-    @objc func showAbout() {
-        let info = Bundle.main.infoDictionary ?? [:]
-        NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationVersion: info["CFBundleShortVersionString"] as? String ?? "dev",
-            .version: info["CFBundleVersion"] as? String ?? ""])
     }
 
     /// Installed once at launch: every registered hot key reports press and release to `hotKey`.
@@ -700,8 +645,9 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// A Settings recorder pauses the hot keys so it can see (and reject) the keys pressed.
-    /// A running recording finishes first: paused, a hold would never see its release.
+    /// A shortcut recorder (Dictation pane) pauses the hot keys so it can see (and reject) the
+    /// keys pressed. A running recording finishes first: paused, a hold would never see its
+    /// release.
     func pauseHotKeys(_ paused: Bool) {
         if paused, phase == .recording { finishRecording() }
         hotKeysPaused = paused
@@ -740,14 +686,10 @@ final class App: NSObject, NSApplicationDelegate {
         appendToLog(["cancel": "fn chord"])
     }
 
-    /// Releasing the talk key no longer finishes. The pill names it, then shows the meter again.
+    /// Releasing the talk key no longer finishes. The pill's mode label says "Hands-free".
     func lockHandsFree() {
         mode = .toggle
-        hud.show("Hands-free")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self = self, self.phase == .recording else { return }
-            self.hud.show()
-        }
+        hud.showRecording(mode: .toggle)
     }
 
     /// The menu item, the window's button and SIGUSR1: start hands-free, or finish whatever
@@ -762,16 +704,16 @@ final class App: NSObject, NSApplicationDelegate {
 
     func startDictation(mode: RecordMode) {
         if needsSetup() { return offerSetup() }
-        // AUDAX's own main window first: its Try-it box gets the text directly, never by ⌘V.
-        // Settings key: AUDAX is the frontmost app and gets ⌘V as any app. AUDAX in front with
-        // neither window key (both closed, the About panel): the app the user was in before, or
-        // the clipboard only when there is none (paste). Another app in front: that app.
-        // Nothing here activates AUDAX: a hot key leaves the app in front where it is.
+        // AUDAX's window key on Home: its Try-it box gets the text directly, never by ⌘V. Key
+        // on another pane (as the Settings window was): AUDAX is the frontmost app and gets ⌘V
+        // as any app. AUDAX in front with its window not key (closed): the app the user was in
+        // before, or the clipboard only when there is none (paste). Another app in front: that
+        // app. Nothing here activates AUDAX: a hot key leaves the app in front where it is.
         let active = NSApp.isActive
-        let settingsKey = settingsWindow?.window.isKeyWindow == true
-        targetIsSelf = active && mainWindow.window.isKeyWindow
+        let windowKey = mainWindow.window.isKeyWindow
+        targetIsSelf = active && windowKey && model.pane == .home
         target = targetIsSelf ? nil
-            : active && !settingsKey ? lastOtherApp : NSWorkspace.shared.frontmostApplication
+            : active && !windowKey ? lastOtherApp : NSWorkspace.shared.frontmostApplication
         AVCaptureDevice.requestAccess(for: .audio) { granted in
             DispatchQueue.main.async {
                 if granted { self.beginRecording(mode: mode) } else {
@@ -792,8 +734,9 @@ final class App: NSObject, NSApplicationDelegate {
         warmCleanupModel()
         preReadModel()
         chime.warned = false
+        model.seconds = 0
         if settings.sounds { chime.start() }
-        hud.show()
+        hud.showRecording(mode: mode)
         // Start the mic 0.1 s in: later clips the first syllable of someone who talks the moment
         // they press. So the start sound's tail falls inside the recording window (≈0.2 s);
         // whether the warm-up skip (the first 0.25 s of readings) keeps it out of the silence
@@ -828,7 +771,8 @@ final class App: NSObject, NSApplicationDelegate {
         let level = voice.update(db: db)
         if voice.ticks > 4, db > -90 { peakDB = max(peakDB, db) }  // VoiceMeter's warm-up skip
         elapsed += tick
-        hud.meter(level, pulse: CGFloat(0.5 + 0.5 * cos(elapsed * 2 * .pi)))
+        hud.meter(level)
+        if Int(elapsed) != model.seconds { model.seconds = Int(elapsed) }  // the toolbar clock
         if elapsed >= maxSeconds {
             stoppedByCap = true
             finishRecording()
@@ -847,10 +791,10 @@ final class App: NSObject, NSApplicationDelegate {
         guard elapsed >= minRecordSeconds, peakDB >= voiceFloorDB else {
             phase = .idle
             if settings.sounds { chime.nothing() }
-            return hud.flash("Didn't catch that")
+            return hud.flash("Didn't catch that", symbol: "waveform.slash", seconds: 1.6)
         }
         phase = .transcribing
-        hud.show("Transcribing…")
+        hud.showTranscribing()
         runDictateScript()
     }
 
@@ -885,14 +829,12 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// What dictate.py reads on stdin. Never logged: it carries the API key, read from the
-    /// Keychain only for the providers that need one. Copilot needs none: dictate.py asks gh.
+    /// What dictate.py (and providers.py --test) reads on stdin. Never logged: the provider
+    /// fields carry secrets from the Keychain. Copilot needs none: dictate.py asks gh.
     func configJSON() -> Data {
-        let provider = settings.provider
-        let key = Settings.keyProviders.contains(provider) ? Keychain.get(account: provider) : nil
-        let config = ["provider": provider, "model": settings.models[provider] ?? "",
-                      "language": settings.language, "cleanup": settings.cleanup,
-                      "api_key": key ?? "", "whisper_path": whisperServer.requestPath]
+        let base: [String: Any] = ["language": settings.language, "cleanup": settings.cleanup,
+                                   "whisper_path": whisperServer.requestPath]
+        let config = base.merging(providerConfigFields(settings)) { mine, _ in mine }
         return (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
     }
 
@@ -905,8 +847,11 @@ final class App: NSObject, NSApplicationDelegate {
         let text = result == nil ? output : result?["text"] as? String ?? ""
         guard status == 0, !text.isEmpty else {
             if settings.sounds { chime.nothing() }
-            let nothing = status == exitNothingHeard
-            return hud.flash(nothing ? "Didn't catch that" : "Something went wrong: see log")
+            if status == exitNothingHeard {
+                return hud.flash("Didn't catch that", symbol: "waveform.slash", seconds: 1.6)
+            }
+            return hud.flash("Something went wrong: see log",
+                             symbol: "exclamationmark.triangle.fill", seconds: 1.6)
         }
         if settings.sounds { chime.done() }
         deliver(text, skipped: result?["cleanup"] as? String == "skipped")
@@ -917,10 +862,15 @@ final class App: NSObject, NSApplicationDelegate {
     func deliver(_ text: String, skipped: Bool) {
         if stoppedByCap {
             copyToClipboard(text)
-            return hud.flash("Copied: recording hit the 5-minute limit", seconds: 4)
+            return hud.flash("Copied: recording hit the 5-minute limit",
+                             symbol: "doc.on.clipboard.fill", seconds: 4)
         }
-        // Before paste, so that paste's own "Allow AUDAX in Accessibility" flash wins.
-        if skipped { hud.flash("Pasted without clean-up", seconds: 2.5) } else { hud.hide() }
+        // Before paste, so that paste's own flashes (clipboard only, Accessibility) win.
+        if skipped {
+            hud.flash("Pasted without clean-up", symbol: "checkmark.circle", seconds: 2.5)
+        } else {
+            hud.flash("Pasted", symbol: "checkmark.circle.fill", seconds: 1.2)
+        }
         paste(text)
     }
 
@@ -929,7 +879,7 @@ final class App: NSObject, NSApplicationDelegate {
     /// or to load another model) and the next clean-up takes ~4 s.
     /// Local Ollama with clean-up on only: nothing is sent for another provider.
     func warmCleanupModel() {
-        guard settings.provider == "ollama", settings.cleanup != "off",
+        guard activeProvider == "ollama", settings.cleanup != "off",
               let url = URL(string: "http://127.0.0.1:11434/api/generate") else { return }
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
@@ -967,11 +917,13 @@ final class App: NSObject, NSApplicationDelegate {
         }
         guard let app = target, !app.isTerminated else {
             appendToLog(["paste": "clipboard only: no app to paste into"])
-            return hud.flash("Copied to the clipboard", seconds: 2)
+            return hud.flash("Copied to the clipboard", symbol: "doc.on.clipboard.fill",
+                             seconds: 2)
         }
         guard AXIsProcessTrusted() else {
             appendToLog(["paste": "blocked: AUDAX is not allowed under Accessibility"])
-            hud.flash("Copied. Allow AUDAX in Accessibility to paste automatically", seconds: 4)
+            hud.flash("Copied. Allow AUDAX in Accessibility to paste automatically",
+                      symbol: "exclamationmark.triangle.fill", seconds: 4)
             return openAccessibility()
         }
         let front = NSWorkspace.shared.frontmostApplication

@@ -228,13 +228,20 @@ enum EnvFile {
     /// The file's KEY=VALUE pairs; [:] when it is missing, unreadable or not UTF-8. Holds
     /// secrets: never logged, never passed on.
     static func values() -> [String: String] {
+        // String(data:encoding:) only checks the bytes: it also drops a BOM, and parse drops
+        // one more. String(decoding:) keeps every BOM, so exactly one goes, as in Python.
         guard let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return [:] }
-        return parse(text)
+              String(data: data, encoding: .utf8) != nil else { return [:] }
+        return parse(String(decoding: data, as: UTF8.self))
     }
+
+    /// Unicode scalars, not Characters: Python compares code points, and a Character would
+    /// join "#" or a quote with a combining mark after it (`#⃣`, `"́`) into something else.
+    typealias Scalars = Substring.UnicodeScalarView
 
     /// The .env grammar shared with providers.load_env_file (env_line, env_value), step by step:
     /// - UTF-8, one leading BOM dropped; lines end at LF, CRLF or CR. Blanks are space and tab.
+    /// - Every comparison is on single Unicode scalars, as Python's are on code points.
     /// - A line is trimmed of blanks; one that starts with # is a comment.
     /// - "export" plus blanks is dropped from its start; then KEY=VALUE splits at the first "=",
     ///   both trimmed. No "=" or an empty key: the line is ignored.
@@ -244,53 +251,58 @@ enum EnvFile {
     ///   its #, and so does `A= # note` (the value is "# note": the blank goes with the "=").
     /// - No escapes, no variable expansion. A repeated key: the last one wins.
     static func parse(_ text: String) -> [String: String] {
-        let body = text.hasPrefix("\u{FEFF}") ? String(text.dropFirst()) : text
+        let all = Substring(text).unicodeScalars
+        let body = all.first == "\u{FEFF}" ? all.dropFirst() : all
         var env: [String: String] = [:]
-        let lines = body.split(omittingEmptySubsequences: false) {
-            $0 == "\n" || $0 == "\r" || $0 == "\r\n"  // CRLF is one Character in Swift
-        }
-        for line in lines {
+        // CRLF splits into a line and an empty one, and an empty line is skipped anyway.
+        for line in body.split(omittingEmptySubsequences: false, whereSeparator: {
+            $0 == "\n" || $0 == "\r"
+        }) {
             if let (key, value) = pair(line) { env[key] = value }
         }
         return env
     }
 
-    static func blank(_ c: Character) -> Bool { c == " " || c == "\t" }
+    static func blank(_ c: Unicode.Scalar) -> Bool { c == " " || c == "\t" }
 
-    static func trim(_ text: Substring) -> Substring {
+    static func string(_ text: Scalars) -> String { String(Substring(text)) }
+
+    static func trim(_ text: Scalars) -> Scalars {
         guard let first = text.firstIndex(where: { !blank($0) }),
-              let last = text.lastIndex(where: { !blank($0) }) else { return "" }
+              let last = text.lastIndex(where: { !blank($0) }) else { return Scalars() }
         return text[first...last]
     }
 
-    static func pair(_ raw: Substring) -> (String, String)? {
+    static func pair(_ raw: Scalars) -> (String, String)? {
         var line = trim(raw)
-        if line.hasPrefix("#") { return nil }
-        if line.hasPrefix("export"), let next = line.dropFirst(6).first, blank(next) {
-            line = line.dropFirst(6).drop(while: blank)
+        if line.first == "#" { return nil }
+        let afterExport = line.dropFirst(6)
+        if line.starts(with: "export".unicodeScalars), let next = afterExport.first, blank(next) {
+            line = afterExport.drop(while: blank)
         }
         guard let eq = line.firstIndex(of: "=") else { return nil }
         let key = trim(line[..<eq])
         guard !key.isEmpty, let value = value(trim(line[line.index(after: eq)...])) else {
             return nil
         }
-        return (String(key), value)
+        return (string(key), value)
     }
 
     /// A trimmed VALUE as `parse` reads it; nil when the line is to be ignored.
-    static func value(_ text: Substring) -> String? {
+    static func value(_ text: Scalars) -> String? {
         if let quote = text.first, quote == "\"" || quote == "'" {
-            guard let end = text.dropFirst().firstIndex(of: quote) else { return nil }
-            let rest = text[text.index(after: end)...].drop(while: blank)
-            guard rest.isEmpty || rest.hasPrefix("#") else { return nil }
-            return String(text[text.index(after: text.startIndex)..<end])
+            let inner = text.dropFirst()
+            guard let end = inner.firstIndex(of: quote) else { return nil }
+            let rest = inner[inner.index(after: end)...].drop(while: blank)
+            guard rest.isEmpty || rest.first == "#" else { return nil }
+            return string(inner[..<end])
         }
-        var previous: Character = "x"  // a # first in the value is part of it
+        var previous: Unicode.Scalar = "x"  // a # first in the value is part of it
         let comment = text.firstIndex { c in
             defer { previous = c }
             return c == "#" && blank(previous)
         }
-        return String(trim(text[..<(comment ?? text.endIndex)]))
+        return string(trim(text[..<(comment ?? text.endIndex)]))
     }
 
     static func nonEmpty(_ value: String?) -> String? {

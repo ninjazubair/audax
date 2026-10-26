@@ -6,6 +6,8 @@ optional clean-up step fixes punctuation, filler words and grammar.
 
 ## Install
 
+**Step-by-step guide, including a Copilot-only install without the 10 GB local model: [INSTALL.md](INSTALL.md).**
+
 1. Open the DMG from the latest release and drag **AUDAX** to Applications.
 2. The app is self-signed, not notarised by Apple. The first time, **right-click AUDAX →
    Open → Open**. After that it opens normally.
